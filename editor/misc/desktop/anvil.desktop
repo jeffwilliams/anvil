@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Anvil
+Exec=anvil
+Icon=anvil
+GenericName=The Anvil Text Editor
+StartupWMClass=Anvil
+Categories=TextEditor;Development
+Keywords=anvil;acme
+Terminal=false
+Type=Application

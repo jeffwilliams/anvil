@@ -1,0 +1,288 @@
+package expr
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"unicode"
+)
+
+type Scanner struct {
+	pos    int
+	input  []rune
+	tokens []token
+	errs   []error
+}
+
+type token struct {
+	typ   tokenType
+	value string
+	// pos is the index of the rune in the input
+	// where the token started
+	pos int
+}
+
+func (t token) tokenType() tokenType {
+	return t.typ
+}
+
+func (t token) len() int {
+	if t.typ == stringTok {
+		return len(t.value)
+	} else {
+		return 1
+	}
+}
+
+func (t token) String() string {
+	if t.value != "" {
+		return fmt.Sprintf("(%s)", t.typ)
+	} else {
+		return fmt.Sprintf("(%s, %s)", t.typ, t.value)
+	}
+}
+
+var nilToken = token{}
+
+func (s *Scanner) Scan(expr string) (tokens []token, ok bool) {
+	s.input = []rune(expr)
+	// TODO: to generate less garbage, re-use the existing arrays.
+	s.tokens = make([]token, 0, 10)
+	s.errs = make([]error, 0, 10)
+
+	for {
+		t, err := s.next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+
+			s.errs = append(s.errs, err)
+		}
+		s.addToken(t)
+	}
+	return s.tokens, len(s.errs) == 0
+}
+
+func (s *Scanner) next() (tok token, err error) {
+	var r rune
+	for {
+		if s.atEnd() {
+			return nilToken, io.EOF
+		}
+
+		r = s.input[s.pos]
+		if !unicode.IsSpace(r) {
+			break
+		}
+		s.pos++
+	}
+
+	tok.pos = s.pos
+
+	lastType := s.lastToken().tokenType()
+	if lastType == slashTok || lastType == questionTok {
+		p := s.pos
+		tok, closingTok, err = s.str()
+		if err != nil {
+			return
+		}
+		tok.pos = p
+		return tok, nil
+	}
+
+	switch r {
+	case '#':
+		s.pos++
+		tok.typ = poundTok
+	case '+':
+		s.pos++
+		tok.typ = plusTok
+	case '-':
+		s.pos++
+		tok.typ = minusTok
+	case ',':
+		s.pos++
+		tok.typ = commaTok
+	case ';':
+		s.pos++
+		tok.typ = semicolonTok
+	case '/':
+		s.pos++
+		tok.typ = slashTok
+	case '?':
+		s.pos++
+		tok.typ = questionTok
+	case '$':
+		s.pos++
+		tok.typ = dollarTok
+	case '\'':
+		s.pos++
+		tok.typ = tickTok
+	case 'x', 'y', 'g', 'v':
+		s.pos++
+		tok.typ = opTok
+		tok.value = string(r)
+	/*case 'p', 'd', 'a', 'c', 'i', 's':
+	s.pos++
+	tok.typ = cmdTok
+	tok.value = string(r)*/
+	default:
+		p := s.pos
+		tok, err = s.numOrRegex()
+		if err != nil {
+			return
+		}
+		tok.pos = p
+	}
+
+	return tok, nil
+}
+
+func (s *Scanner) numOrRegex() (token, error) {
+	last := s.lastToken().tokenType()
+	if last == slashTok || last == questionTok {
+		return s.str()
+	} else {
+		return s.num()
+	}
+}
+
+func (s *Scanner) str() (token, token, error) {
+	var buf bytes.Buffer
+
+	// Read until we find a matching unescaped ? or /
+
+	var lookFor rune
+	switch s.lastToken().tokenType() {
+	case slashTok:
+		lookFor = '/'
+	case questionTok:
+		lookFor = '?'
+	default:
+		s.pos++ // Consume this bad character
+		return nilToken, fmt.Errorf("It seems like this is a string, but a string cannot follow a token other than / or ?")
+	}
+
+	nextRuneEscaped := false
+	for {
+		if s.atEnd() {
+			return token{typ: stringTok, value: buf.String()}, nilToken, nil
+		}
+
+		r := s.input[s.pos]
+
+		if !nextRuneEscaped && r == lookFor {
+			var closingToken token
+			if lookFor == '/' {
+				closingToken.typ = slashTok
+			} else if lookFor == '?' {
+				closingToken.typ = questionTok
+			}
+			closingToken.pos = s.pos
+
+			return token{typ: stringTok, value: buf.String()}, closingToken, nil
+		}
+
+		nextRuneEscaped = r == '\\'
+
+		if !nextRuneEscaped {
+			buf.WriteRune(r)
+		}
+		s.pos++
+	}
+}
+
+func (s *Scanner) num() (token, error) {
+	var buf bytes.Buffer
+	r := s.input[s.pos]
+
+	if !s.isValidNumRune(r) {
+		s.pos++ // Consume this bad character
+		return nilToken, fmt.Errorf("Invalid character '%c' encountered", r)
+	}
+
+	for s.isValidNumRune(r) {
+		buf.WriteRune(r)
+		s.pos++
+
+		if s.atEnd() {
+			return token{typ: numTok, value: buf.String()}, nil
+		}
+		r = s.input[s.pos]
+	}
+
+	return token{typ: numTok, value: buf.String()}, nil
+}
+
+func (s *Scanner) isValidNumRune(r rune) bool {
+	return r >= '0' && r <= '9'
+}
+
+func (s *Scanner) addToken(t token) {
+	s.tokens = append(s.tokens, t)
+}
+
+func (s *Scanner) lastToken() token {
+	if len(s.tokens) == 0 {
+		return nilToken
+	}
+	return s.tokens[len(s.tokens)-1]
+}
+
+func (s *Scanner) atEnd() bool {
+	return s.pos >= len(s.input)
+}
+
+type tokenType int
+
+const (
+	nilTok tokenType = iota
+	poundTok
+	plusTok
+	minusTok
+	commaTok
+	semicolonTok
+	slashTok
+	questionTok
+	dollarTok
+	tickTok
+	opTok
+	cmdTok
+	numTok
+	stringTok
+)
+
+func (t tokenType) String() string {
+	switch t {
+	case nilTok:
+		return "nilTok"
+	case poundTok:
+		return "poundTok"
+	case plusTok:
+		return "plusTok"
+	case minusTok:
+		return "minusTok"
+	case commaTok:
+		return "commaTok"
+	case semicolonTok:
+		return "semicolonTok"
+	case slashTok:
+		return "slashTok"
+	case questionTok:
+		return "questionTok"
+	case dollarTok:
+		return "dollarTok"
+	case tickTok:
+		return "tickTok"
+	case opTok:
+		return "opTok"
+	case cmdTok:
+		return "cmdTok"
+	case numTok:
+		return "numTok"
+	case stringTok:
+		return "stringTok"
+	}
+	return "<unknown token>"
+}

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+#
+# Run clang-format on selected parts of text in an Anvil window body.
+#
+
+BASE_STYLE=Mozilla
+
+clang_parts=""
+
+# Get the selections of the current window in CSV format and strip off the CSV header line.
+selections=`curl -s -H 'Accept: text/csv' -H "Anvil-Sess: $ANVIL_API_SESS" http://localhost:$ANVIL_API_PORT/wins/$ANVIL_WIN_ID/selections | tail -n +2`
+if [ "$selections" != "" ]
+then
+  for sel in $selections
+  do
+    #echo "selection: $sel"
+    offset=`echo $sel | cut -d, -f1,1`
+    length=`echo $sel | cut -d, -f3,3`
+
+    clang_parts="$clang_parts -offset $offset -length $length"
+  done
+
+# >&2 echo "parts are: $clang_parts"
+fi
+
+# Get contents of window, pipe it through clang-format, then put the result back into the window.
+
+curl -s -H "Anvil-Sess: $ANVIL_API_SESS" http://localhost:$ANVIL_API_PORT/wins/$ANVIL_WIN_ID/body | \
+  clang-format -style="{BasedOnStyle: $BASE_STYLE, IndentWidth: 4, ColumnLimit: 0}" $clang_parts | \
+  curl -X PUT -s -H "Anvil-Sess: $ANVIL_API_SESS" --data-binary @- http://localhost:$ANVIL_API_PORT/wins/$ANVIL_WIN_ID/body
+
+
