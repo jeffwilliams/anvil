@@ -723,8 +723,8 @@ func (a ApiHandler) putWindowTag(winId int, rsp http.ResponseWriter, req *http.R
 			log(LogCatgAPI, "APIHandler: calculating tag parts failed: %v\n", err)
 		}
 
-		win.displayPath = *NewGlobalPath(file, GlobalPathIsFile)
-		win.loadPath = win.displayPath
+		win.SetDisplayPath(NewGlobalPath(file, GlobalPathIsFile))
+		win.SetLoadPath(win.DisplayPath())
 		win.fileType = typeFile
 		win.initialTagUserArea = ""
 		win.customEdCommands = edArea

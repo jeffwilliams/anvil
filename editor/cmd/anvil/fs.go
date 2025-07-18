@@ -150,10 +150,12 @@ type simpleFs interface {
 	saveFileAsync(path string, contents []byte, errs chan error, kill chan struct{}) (err error)
 	filenamesInDir(path string) (names []string, err error)
 	filenamesInDirAsync(path string, names chan []string, errs chan error, kill chan struct{}) (err error)
+	filenamesInDirsAsync(runpath string, dirs []string, names chan []string, errs chan error, kill chan struct{}) (err error)
 	exec(dir, cmd, arg string) (output []byte, err error)
 	//execAsync(dir, cmd, arg string, stdin []byte, contents chan []byte, errs chan error, kill chan struct{}) (err error)
 	execAsync(execCtx) (err error)
 	contentsAsync(path string, names chan []string, contents chan []byte, errs chan error, kill chan struct{}) (err error)
+	getEnvAsync(name, path string, val chan string, errs chan error, kill chan struct{}) (err error)
 }
 
 type execCtx struct {
@@ -308,6 +310,25 @@ func (f localFs) filenamesInDirAsync(path string, names chan []string, errs chan
 	return
 }
 
+func (f localFs) filenamesInDirsAsync(runpath string, dirs []string, names chan []string, errs chan error, kill chan struct{}) (err error) {
+	go func() {
+		defer close(errs)
+		defer close(names)
+
+		for _, dir := range dirs {
+			lnames, err := filenamesInDir(dir)
+			if err != nil {
+				errs <- err
+				continue
+			}
+
+			names <- lnames
+		}
+	}()
+	return
+
+}
+
 func (f localFs) contentsAsync(path string, names chan []string, contents chan []byte, errs chan error, kill chan struct{}) (err error) {
 	isDir, err := f.isDir(path)
 	if err != nil {
@@ -430,6 +451,15 @@ func (f localFs) setupForAsyncExec(c execCtx) (cmd *exec.Cmd, stdout, stderr io.
 	go copyBlocks(stderr, c2, 1024*1024, c.errs, nil)
 
 	return
+}
+
+func (f localFs) getEnvAsync(name, path string, val chan string, errs chan error, kill chan struct{}) (err error) {
+	go func() {
+		val <- os.Getenv(name)
+		close(errs)
+		close(val)
+	}()
+	return nil
 }
 
 func forkKill(kill chan struct{}) (kill2, kill3 chan struct{}) {
@@ -804,6 +834,33 @@ func (f *sshFs) filenamesInDirAsync(path string, names chan []string, errs chan 
 	return
 }
 
+func (f *sshFs) filenamesInDirsAsync(runpath string, dirs []string, names chan []string, errs chan error, kill chan struct{}) (err error) {
+	fmt.Printf("sshFs.filenamesInDirsAsync: called\n")
+	_, session, _, err := f.splitFilenameAndMakeSession(runpath, kill)
+	if err != nil {
+		return
+	}
+
+	go func() {
+		dirArgs := strings.Join(dirs, " ")
+		cmd := fmt.Sprintf(`%s -c 'find %s -maxdepth 1 -printf "%%f\n" | sort'`, f.getShell(), dirArgs)
+		b, err := session.Output(cmd)
+		if err != nil {
+			errs <- err
+			close(names)
+			close(errs)
+			return
+		}
+		lnames := strings.Split(string(b), "\n")
+		names <- lnames
+		session.Close()
+		close(names)
+		close(errs)
+	}()
+
+	return
+}
+
 func (f *sshFs) contentsAsync(path string, names chan []string, contents chan []byte, errs chan error, kill chan struct{}) (err error) {
 	go func() {
 		isDir, err := f.isDirAsync(path, kill)
@@ -1003,6 +1060,75 @@ func buildShellString(c execCtx, shell, dir, extra string) string {
 	s = strings.ReplaceAll(s, "{Cmd}", escapeSingleTicks(c.cmd))
 	s = strings.ReplaceAll(s, "{Args}", escapeSingleTicks(c.arg))
 	return s
+}
+
+func (f sshFs) getEnvAsync(name, path string, val chan string, errs chan error, kill chan struct{}) (err error) {
+	go func() {
+		_, session, _, err := f.splitFilenameAndMakeSession(path, kill)
+		if err != nil {
+			errs <- err
+			return
+		}
+
+		cmd := fmt.Sprintf("%s -c 'echo $%s'", f.getShell(), name)
+		log(LogCatgFS, "sshFs.getEnvAsync: running command: %s\n", cmd)
+
+		stdout, err := session.StdoutPipe()
+		if err != nil {
+			errs <- err
+			return
+		}
+
+		err = session.Start(cmd)
+		if err != nil {
+			errs <- err
+			return
+		}
+
+		forceClosedSession := newSemchan()
+
+		go func() {
+			<-kill
+			log(LogCatgFS, "sshFs.getEnvAsync: kill received. Closing session\n")
+			// See https://github.com/golang/go/issues/16597
+			session.Signal(ssh.SIGKILL)
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				forceClosedSession.write()
+				session.Close()
+			}()
+		}()
+
+		data, err := io.ReadAll(stdout)
+		if err != nil {
+			errs <- err
+			return
+		}
+
+		if data[len(data)-1] == '\n' {
+			data = data[:len(data)-1]
+		}
+		val <- string(data)
+		close(val)
+
+		go func() {
+			log(LogCatgFS, "sshFs.getEnvAsync: kill: waiting for status\n")
+			err := session.Wait()
+			log(LogCatgFS, "sshFs.getEnvAsync: kill: wait done\n")
+			if err != nil {
+				if forceClosedSession.wasWrittenTo() {
+					err = fmt.Errorf("killed process, but got no response")
+				}
+
+				log(LogCatgFS, "sshFs.getEnvAsync: wait error: %v\n", err)
+				log(LogCatgFS, "sshFs.getEnvAsync: sending error on chan\n")
+				errs <- err
+			}
+			close(errs)
+		}()
+
+	}()
+	return nil
 }
 
 func (f sshFs) maybeServeAPIOverSshClient(client *SshClient) (err error) {

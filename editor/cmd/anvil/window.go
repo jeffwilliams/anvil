@@ -335,8 +335,8 @@ func firstNRunesStr(s string, n int) (first, rest string, runeCount int) {
 }
 
 func (w *Window) SetTagFromDisplayPath() {
-	w.Tag.label = fmt.Sprintf("tag of %s", w.displayPath)
-	w.Body.label = fmt.Sprintf("body of %s", w.displayPath)
+	w.Tag.label = fmt.Sprintf("tag of %s", w.DisplayPath())
+	w.Body.label = fmt.Sprintf("body of %s", w.DisplayPath())
 
 	if w.onlyShowBasenamesInTag {
 		w.setTagToBasename()
@@ -357,18 +357,18 @@ func (w *Window) SetTagFromDisplayPath() {
 		t = w.edCommandsForUnknown()
 	}
 
-	userArea, err := w.userArea(w.displayPath.String())
+	userArea, err := w.userArea(w.DisplayPath().String())
 
 	if err != nil {
-		w.Tag.Set(w.displayPath.String(), t, "")
+		w.Tag.Set(w.DisplayPath().String(), t, "")
 	} else {
-		w.Tag.Set(w.displayPath.String(), t, userArea)
+		w.Tag.Set(w.DisplayPath().String(), t, userArea)
 	}
 
 }
 
 func (c *Window) setTagToBasename() {
-	path := c.displayPath.Base()
+	path := c.DisplayPath().Base()
 	editorArea := ""
 	if c.Tag.layedoutText != nil && c.Tag.layedoutText.LineCount() > 1 {
 		// Keep the tag the same height as when it displays the full path.
@@ -427,7 +427,7 @@ func (c *Window) userArea(path string) (string, error) {
 
 	if c.initialTagUserArea != "" {
 		userArea = c.initialTagUserArea
-		if strings.HasSuffix(path, "+Errors") && !strings.HasSuffix(userArea, " Clr") && !strings.Contains(userArea, " Clr ") {
+		if IsErrorsWindow(path) && !strings.HasSuffix(userArea, " Clr") && !strings.Contains(userArea, " Clr ") {
 			userArea = " Clr" + userArea
 		}
 
@@ -498,19 +498,19 @@ func (w *Window) RemoveUndoHistoryFromTag() {
 }
 
 func (w *Window) Put() error {
-	if w.displayPath.String() == "" {
+	if w.DisplayPath().String() == "" {
 		editor.AppendError("", "Can't Put: filename is empty")
 		return fmt.Errorf("Can't Put with an empty filename")
 	}
 
 	completer := NewPathCompleterForColumn(w.col)
-	p, _ := completer.Complete(w.displayPath.String())
-	w.loadPath = *p
+	p, _ := completer.Complete(w.DisplayPath().String())
+	w.SetLoadPath(p)
 
 	var ldr FileLoader
 	b := w.Body.Bytes()
 
-	save, err := ldr.SaveAsync(w.loadPath.String(), b)
+	save, err := ldr.SaveAsync(w.LoadPath().String(), b)
 	if err != nil {
 		log(LogCatgWin, "Window.Save: error: %v\n", err)
 		editor.AppendError("", err.Error())
@@ -518,7 +518,7 @@ func (w *Window) Put() error {
 	}
 
 	ws := &WindowDataSave{
-		Jobname: w.displayPath.Base(),
+		Jobname: w.DisplayPath().Base(),
 		Win:     w,
 		errs:    save.Errs,
 		kill:    save.Kill,
@@ -543,16 +543,16 @@ func (w *Window) GetWithSelect(selectBehaviour selectBehaviour, growBodyBehaviou
 	}
 
 	// In case the user changed the display string, update the file we'll load
-	if s := w.loadPath.String(); s != "+Errors" && s != "" {
+	if s := w.LoadPath().String(); s != "+Errors" && s != "+Live" && s != "" {
 		completer := NewPathCompleterForColumn(w.col)
-		p := completer.CompleteNoCheck(w.displayPath.String())
-		if w.loadPath.String() != p.String() {
-			w.loadPath = *p
+		p := completer.CompleteNoCheck(w.DisplayPath().String())
+		if w.LoadPath().String() != p.String() {
+			w.SetLoadPath(p)
 		}
 	}
 	savedCursors := w.Tag.saveCursorsAndSelections()
 
-	err := w.LoadFileOpts(&w.displayPath, &w.loadPath, opts)
+	err := w.LoadFileOpts(w.DisplayPath(), w.LoadPath(), opts)
 	if err != nil {
 		return err
 	}
@@ -603,8 +603,8 @@ func (f *FillEditableWithItemList) preDrawHook(e *editable, gtx layout.Context) 
 }
 
 func (c *Window) SetPathsAndTag(displayPath, loadPath *GlobalPath) {
-	c.displayPath = *displayPath
-	c.loadPath = *loadPath
+	c.SetDisplayPath(displayPath)
+	c.SetLoadPath(loadPath)
 	//c.displayPath.EnsureDirEndsInSlash()
 	c.makeDisplayPathRelativeToColPath()
 	c.ensureDirEndsInSlash()
@@ -623,7 +623,7 @@ func (c *Window) makeDisplayPathRelativeToColPath() {
 	if strings.HasSuffix(cp, "/") || strings.HasSuffix(cp, "\\") {
 		cp = cp[:len(cp)-1]
 	}
-	dp := c.loadPath.String()
+	dp := c.LoadPath().String()
 
 	if !strings.HasPrefix(dp, cp) {
 		return
@@ -632,7 +632,7 @@ func (c *Window) makeDisplayPathRelativeToColPath() {
 	log(LogCatgWin, "Window.makeDisplayPathRelativeToColPath: colpath: %s loadpath: %s\n", cp, dp)
 
 	if dp == cp {
-		c.displayPath = *NewGlobalPath(".", c.loadPath.DirState())
+		c.SetDisplayPath(NewGlobalPath(".", c.LoadPath().DirState()))
 		log(LogCatgWin, "Window.makeDisplayPathRelativeToColPath(1): changing displaypath to '%s'\n", c.displayPath)
 		return
 	}
@@ -642,8 +642,8 @@ func (c *Window) makeDisplayPathRelativeToColPath() {
 	// prefix.
 	if strings.HasPrefix(dp, cp) && (strings.HasSuffix(cp, "/") || strings.HasSuffix(cp, "\\")) {
 		dp = dp[len(cp):]
-		c.displayPath = *NewGlobalPath(dp, c.loadPath.DirState())
-		log(LogCatgWin, "Window.makeDisplayPathRelativeToColPath(2): changing displaypath to '%s'\n", c.displayPath)
+		c.SetDisplayPath(NewGlobalPath(dp, c.LoadPath().DirState()))
+		log(LogCatgWin, "Window.makeDisplayPathRelativeToColPath(2): changing displaypath to '%s'\n", c.DisplayPath())
 		return
 	}
 
@@ -652,13 +652,13 @@ func (c *Window) makeDisplayPathRelativeToColPath() {
 		if dp == "" {
 			dp = "."
 		}
-		c.displayPath = *NewGlobalPath(dp, c.loadPath.DirState())
-		log(LogCatgWin, "Window.makeDisplayPathRelativeToColPath(3): changing displaypath to '%s'\n", c.displayPath)
+		c.displayPath = *NewGlobalPath(dp, c.LoadPath().DirState())
+		log(LogCatgWin, "Window.makeDisplayPathRelativeToColPath(3): changing displaypath to '%s'\n", c.DisplayPath())
 	}
 }
 
 func (c *Window) ensureDirEndsInSlash() {
-	if c.displayPath.DirState() != GlobalPathIsDir {
+	if c.DisplayPath().DirState() != GlobalPathIsDir {
 		return
 	}
 
@@ -667,8 +667,8 @@ func (c *Window) ensureDirEndsInSlash() {
 		return
 	}
 
-	remote := c.displayPath.IsRemote()
-	if !remote && !isWindowsPath(c.displayPath.Path()) && colPath.IsRemote() {
+	remote := c.DisplayPath().IsRemote()
+	if !remote && !isWindowsPath(c.DisplayPath().Path()) && colPath.IsRemote() {
 		remote = true
 	}
 
@@ -677,8 +677,8 @@ func (c *Window) ensureDirEndsInSlash() {
 		sep = "/"
 	}
 
-	if !strings.HasSuffix(c.displayPath.Path(), sep) {
-		c.displayPath.SetPath(c.displayPath.Path() + sep)
+	if !strings.HasSuffix(c.DisplayPath().Path(), sep) {
+		c.displayPath.SetPath(c.DisplayPath().Path() + sep)
 	}
 
 }
@@ -704,12 +704,12 @@ func (w *Window) UpdateFilenameFromTag() {
 	fname := tag[:n]
 
 	if fname == "" {
-		w.loadPath = GlobalPath{}
-		w.displayPath = GlobalPath{}
+		w.SetLoadPath(&GlobalPath{})
+		w.SetDisplayPath(&GlobalPath{})
 		return
 	}
 
-	if fname == "+Errors" {
+	if fname == "+Errors" || fname == "+Live" {
 		return
 	}
 
@@ -718,16 +718,16 @@ func (w *Window) UpdateFilenameFromTag() {
 	// Maybe on column tag change, we should update this instead.
 	if w.col != nil {
 		completer := NewPathCompleterForColumn(w.col)
-		w.loadPath = *completer.CompleteNoCheck(fname)
-		w.displayPath = *NewGlobalPath(fname, w.loadPath.DirState())
+		w.SetLoadPath(completer.CompleteNoCheck(fname))
+		w.SetDisplayPath(NewGlobalPath(fname, w.LoadPath().DirState()))
 		// This code handles a special case. Say the window path is /home/user/src/anvil-suite/anvil/src/anvil, and that it is a directory. Then the user
 		// cuts the beginning of the path so we are left with src/anvil. We don't know now whether the prefix represents a directory or not. We could
 		// check, but if the path is remote that is costly. Instead we assume the filetype didn't change; if it was a directory, it is still a directory.
 		// This is not perfect, but should work in most cases. The alternative is that other code that needs to tell if the path is a directory or not
 		// (such as adapter.execute) can resolve it at that time.
-		if w.loadPath.DirState() == GlobalPathUnknown {
-			w.loadPath.SetDirState(GlobalPathDirState(w.fileType))
-			w.displayPath.SetDirState(GlobalPathDirState(w.fileType))
+		if w.LoadPath().DirState() == GlobalPathUnknown {
+			w.LoadPath().SetDirState(GlobalPathDirState(w.fileType))
+			w.DisplayPath().SetDirState(GlobalPathDirState(w.fileType))
 		}
 	}
 
@@ -753,7 +753,7 @@ func (c *Window) Zerox() (nw *Window, err error) {
 	// The body of the new window and the current window will share the same piece table
 	nw.Body.text = c.Body.text
 
-	nw.SetPathsAndTag(c.displayPath.Clone(), c.loadPath.Clone())
+	nw.SetPathsAndTag(c.DisplayPath().Clone(), c.LoadPath().Clone())
 
 	c.addClone(nw)
 	nw.addClone(c)
@@ -835,7 +835,7 @@ func (w *Window) removeFromAllClones() {
 
 func (w *Window) maybeEnableSyntax() {
 	if w.fileType == typeFile {
-		w.Body.EnableSyntax(w.displayPath.String())
+		w.Body.EnableSyntax(w.DisplayPath().String())
 		w.setBodyCompletionSource()
 		w.Body.BuildCompletions()
 		w.Body.HighlightSyntax()
@@ -843,7 +843,7 @@ func (w *Window) maybeEnableSyntax() {
 }
 
 func (w *Window) IsErrorsWindow() bool {
-	return IsErrorsWindow(w.displayPath.String())
+	return IsErrorsWindow(w.DisplayPath().String())
 }
 
 func IsErrorsWindow(windowFilename string) bool {
@@ -851,7 +851,7 @@ func IsErrorsWindow(windowFilename string) bool {
 }
 
 func (w *Window) IsLiveWindow() bool {
-	return IsLiveWindow(w.displayPath.String())
+	return IsLiveWindow(w.DisplayPath().String())
 }
 
 func IsLiveWindow(windowFilename string) bool {
@@ -953,7 +953,7 @@ func (w *Window) centerBodyOnFirstCursorOrPrimarySelection() {
 }
 
 func (w *Window) setBodyCompletionSource() {
-	src := w.displayPath.String()
+	src := w.DisplayPath().String()
 	if src == "" {
 		src = fmt.Sprintf("unnamed-%p", w.Body.Tag())
 	}

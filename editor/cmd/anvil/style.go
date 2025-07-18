@@ -7,10 +7,10 @@ import (
 	"os"
 	"strings"
 
-	"golang.org/x/image/colornames"
-
 	"gioui.org/text"
 	"gioui.org/unit"
+	"github.com/jeffwilliams/anvil/editor/internal/draw"
+	"golang.org/x/image/colornames"
 )
 
 type Style struct {
@@ -25,6 +25,7 @@ type Style struct {
 	LayoutBoxBgColor                Color
 	ScrollFgColor                   Color
 	ScrollBgColor                   Color
+	ScrollBorderColor               Color
 	GutterWidth                     unit.Dp
 	WinBorderColor                  Color
 	WinBorderWidth                  unit.Dp
@@ -46,6 +47,8 @@ type Style struct {
 	Ansi                            AnsiStyle
 	LineSpacing                     unit.Dp
 	TextLeftPadding                 unit.Dp
+	CursorProg                      string
+	compiledCursorProg              []draw.Op
 }
 
 type FontStyle struct {
@@ -82,9 +85,10 @@ func (as AnsiStyle) AsColors() [16]color.NRGBA {
 
 func (s Style) tagEditableStyle() editableStyle {
 	return editableStyle{
-		Fonts:       s.Fonts,
-		FgColor:     s.TagFgColor,
-		LineSpacing: s.LineSpacing,
+		Fonts:              s.Fonts,
+		FgColor:            s.TagFgColor,
+		LineSpacing:        s.LineSpacing,
+		compiledCursorProg: s.compiledCursorProg,
 		PrimarySelection: textStyle{
 			FgColor: s.PrimarySelectionFgColor,
 			BgColor: s.PrimarySelectionBgColor,
@@ -124,9 +128,10 @@ func (s Style) bodyBlockStyle() blockStyle {
 
 func (s Style) bodyEditableStyle() editableStyle {
 	return editableStyle{
-		Fonts:       s.Fonts,
-		FgColor:     s.BodyFgColor,
-		LineSpacing: s.LineSpacing,
+		Fonts:              s.Fonts,
+		FgColor:            s.BodyFgColor,
+		LineSpacing:        s.LineSpacing,
+		compiledCursorProg: s.compiledCursorProg,
 		PrimarySelection: textStyle{
 			FgColor: s.PrimarySelectionFgColor,
 			BgColor: s.PrimarySelectionBgColor,
@@ -160,6 +165,7 @@ func (s Style) scrollbarStyle() scrollbarStyle {
 	return scrollbarStyle{
 		FgColor:     color.NRGBA(s.ScrollFgColor),
 		BgColor:     color.NRGBA(s.ScrollBgColor),
+		BorderColor: color.NRGBA(s.ScrollBorderColor),
 		GutterWidth: s.GutterWidth,
 		Fonts:       s.Fonts,
 	}

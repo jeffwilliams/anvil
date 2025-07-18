@@ -10,6 +10,7 @@ import (
 // embedded in (the editor)
 type adapter interface {
 	completeFilename(word string, callback CompletionsCallback)
+	completeCommand(word string, callback CompletionsCallback)
 	appendError(dir, msg string)
 	clearErrors()
 	copyAllSelectionsFromLastSelectedEditable(gtx layout.Context)
@@ -50,16 +51,28 @@ type adapter interface {
 type editableAdapter struct {
 	executor *CommandExecutor
 	// owner is the owner of the editable: a Window, Col or Editor.
-	owner       interface{}
-	shellString string
+	owner                           interface{}
+	shellString                     string
+	omitWindowPathWhenResolvingPath bool
 }
 
 func (a editableAdapter) completeFilename(word string, callback CompletionsCallback) {
 	dir, base, err := computeDirAndBaseForFilenameCompletion(word, a.completer())
-	log(LogCatgCompletion, "adapter: Complete on dir='%s' base='%s'\n", dir, base)
+	log(LogCatgCompletion, "adapter: Complete filename on dir='%s' base='%s'\n", dir, base)
 
 	// This will call editable.applyFilenameCompletions when complete
 	err = FilenameCompletionsAsync(word, dir, base, callback)
+	if err != nil {
+		editor.AppendError(dir, err.Error())
+		return
+	}
+}
+
+func (a editableAdapter) completeCommand(word string, callback CompletionsCallback) {
+	dir, err := computeDirForCommandCompletion(a.completer())
+	log(LogCatgCompletion, "adapter: Complete command on dir='%s'\n", dir)
+
+	err = CommandCompletionsAsync(word, dir, a.executor, callback)
 	if err != nil {
 		editor.AppendError(dir, err.Error())
 		return
@@ -109,7 +122,11 @@ func (a editableAdapter) completer() *PathCompleter {
 
 	switch v := a.executor.source.(type) {
 	case *Window:
-		completer = NewPathCompleterForWindow(v)
+		if a.omitWindowPathWhenResolvingPath {
+			completer = NewPathCompleterForWindowOmitWinPath(v)
+		} else {
+			completer = NewPathCompleterForWindow(v)
+		}
 	case *Col:
 		completer = NewPathCompleterForColumn(v)
 	default:
@@ -321,6 +338,7 @@ func (a editableAdapter) insertWhenTabPressed() string {
 type nilAdapter struct{}
 
 func (a nilAdapter) completeFilename(word string, callback CompletionsCallback)         {}
+func (a nilAdapter) completeCommand(word string, callback CompletionsCallback)          {}
 func (a nilAdapter) appendError(dir, msg string)                                        {}
 func (a nilAdapter) copyAllSelectionsFromLastSelectedEditable(gtx layout.Context)       {}
 func (a nilAdapter) cutAllSelectionsFromLastSelectedEditable(gtx layout.Context)        {}

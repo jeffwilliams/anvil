@@ -204,8 +204,6 @@ func (l *colLayouter) setOffsetAndLayoutWindows(gtx layout.Context, startY int) 
 
 	if len(l.col.Windows) > 0 {
 		l.layoutWindows()
-	} else {
-		l.fillEmptyColumn(gtx)
 	}
 }
 
@@ -240,14 +238,6 @@ func (l *colLayouter) layoutWindows() {
 		l.col.setConstraintsToWindowHeight(&l.gtx, i)
 		w.Layout(l.gtx)
 	}
-}
-
-func (l *colLayouter) fillEmptyColumn(gtx layout.Context) {
-	paint.ColorOp{Color: color.NRGBA(l.style.BodyBgColor)}.Add(l.gtx.Ops)
-	borderw := gtx.Metric.Dp(l.style.WinBorderWidth)
-	st := drawFilledBox(l.gtx, float32(l.gtx.Constraints.Max.X), float32(l.gtx.Constraints.Max.Y-borderw))
-	paint.PaintOp{}.Add(l.gtx.Ops)
-	st.Pop()
 }
 
 func (l *colLayouter) drawBottomBorder(gtx layout.Context) (height int) {

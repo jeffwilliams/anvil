@@ -5,21 +5,24 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/image/colornames"
-
 	"gioui.org/layout"
+	"gioui.org/unit"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/jeffwilliams/anvil/editor/internal/escape"
+	"github.com/jeffwilliams/flamegraph"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/image/colornames"
 )
 
 var cmdHistory = NewCommandHistory(100)
@@ -27,7 +30,6 @@ var cmdHistory = NewCommandHistory(100)
 type CommandExecutor struct {
 	// source is a Window, Col or Editor.
 	source interface{}
-	//commands map[string]command
 	commandSet
 	debugCommandSet commandSet
 }
@@ -80,6 +82,7 @@ func NewCommandExecutor(source interface{}) *CommandExecutor {
 func (c *CommandExecutor) initCommands() {
 	c.initDebugCommands()
 	c.initToplevelCommands()
+	c.addCommandlistToHelp()
 }
 
 func (c *CommandExecutor) initToplevelCommands() {
@@ -112,6 +115,7 @@ func (c *CommandExecutor) initToplevelCommands() {
 	addCommand("Dump", c.CmdDump, "Save the editor's state to disk", fmt.Sprintf("Usage: Dump [filename]\n\nDump saves the editor's state to disk: the size of the open windows and the current value of their tags. With an argument the state is written to the file named by the argument. With no argument state is written to the file %s.dump. The state can be loaded using Load", editorName))
 	addCommand("Load", c.CmdLoad, "Load the editor's state from disk", fmt.Sprintf("Usage: Load [filename]\n\nLoad loads the editor's state from disk as written by the Dump command. With an argument the state is read from the file named by the argument. With no argument state is read from the file %s.dump", editorName))
 	addCommand("Putall", c.CmdPutall, "Save all windows", "Putall executes a Put on all open windows, saving all windows.")
+	addCommand("Getall", c.CmdGetall, "Get all windows", "Getall executes a Get on all open windows, reloading all windows.")
 	addCommand("Recent", c.CmdRecent, "Display recent files", "Recent writes the list of most recently closed files to the Errors window.")
 	addCommand("Mark", c.CmdMark, "Add a bookmark", "Usage: Mark [markname]\n\nMark saves the current cursor position in the window body with the name specified by the argument. If no argument is given it is saved with the name 'def'.")
 	addCommand("Goto", c.CmdGoto, "Jump to a bookmark", "Usage: Goto [markname]\n\nGoto sets the current cursor position in the window body to the named bookmark, created by Mark. If no argument is given it jumps to the bookmark 'def'.")
@@ -126,6 +130,7 @@ func (c *CommandExecutor) initToplevelCommands() {
 	addCommand("Do", c.CmdDo, "Execute command", "Usage: Do <command...>\n\nDo executes it's arguments as a command; i.e. as if the arguments were selceted and executed alone. This is useful to execute commands from one window in the context of another window.")
 	addCommand("About", c.CmdAbout, "About the editor", "Print information about the editor, including where some files are expected to be located")
 	addCommand("Font", c.CmdFont, "Change to next font", "Change to the next font defined in the styles")
+	addCommand("Fontsize", c.CmdFontSize, "Change the font size", "Change the font size of the current active font. This command accepts one argument. If the argument is a number, then the font size is set to that value in points. If it is +NUM or -NUM then the current font size is increased or decreased by NUM points respectively")
 	addCommand("On", c.CmdOn, "Run command on remote host", "Usage: On <path> <command...>\n\nRun takes two or more arguments. The first is a host and directory (in the format host:directory) and the remaining arguments are the command and arguments to run.")
 	addCommand("Cmds", c.CmdCmds, "List the recent external commands", "List the most recent external commands executed")
 	addCommand("Cmds*", c.CmdCmdsVerbose, "List the recent external commands verbosely", "List the most recent external commands executed along with the directory they were executed in")
@@ -133,10 +138,12 @@ func (c *CommandExecutor) initToplevelCommands() {
 	addCommand("Undo", c.CmdUndo, "Undo the last change", "Undo the last change")
 	addCommand("Redo", c.CmdRedo, "Redo the last change", "Redo the last change")
 	addCommand("PrintCfg", c.CmdPrintCfg, "Print a sample config file", "Usage: PrintCfg <default settings file name>\n\nPrint a sample config file to +Errors. The argument specifies the type of config file to print:\n  ◊PrintCfg settings.toml◊ generates a settings file\n")
-	addCommand("Only", c.CmdOnly, "Del other windows in this column", "When executed in a window or its tag, close the other windows in this column leaving only this window.")
+	addCommand("Only", c.CmdOnly, "Del other windows in this column", "Only takes effect when executed in a window or its tag. With no argument, close the other windows in this column leaving only this window. With the argument 'above', close windows below this window. With the argument 'below', close windows above this window.")
 	addCommand("Clr", c.CmdClr, "Clear (delete) the contents of the window body", "Clear (delete) the contents of the window body")
-	addCommand("Shstr", c.CmdShstr, "Usage: Shstr [string...]\n\nSet the 'Shell String' for the current window",
-		`When executed with one or more arguments, set the 'Shell String' for the current window: the template string that is used to build the command run on a remote system. It may contain these substitutions within braces:
+	addCommand("Shstr", c.CmdShstr, "Set the 'Shell String' for the current window",
+		`Usage: Shstr [string...]
+
+When executed with one or more arguments, set the 'Shell String' for the current window: the template string that is used to build the command run on a remote system. It may contain these substitutions within braces:
 
   Dir: The window directory
   Cmd: The name of the command to be executed
@@ -164,7 +171,7 @@ The Fuzz command is special in that it can be executed dynamically as you type t
 	addCommand("Sort", c.CmdSort, "Sort the windows in the column", "Sort sorts the windows in the column by their file paths")
 	addCommand("Rel", c.CmdRel, "Make the window paths in the column relative", "If the column has a column path specified, this command makes all of the paths of the windows in the column relative to that column path.")
 	addCommand("Wrap", c.CmdWrap, "Enable or disable line wrapping", "When run with no argument, line wrapping is enabled. When run with the argument 'off', word wrapping is disabled.")
-	addCommand("Alias", c.CmdAlias, "Create a command alias", "Usage: Alias [name] [command...]\n\nAlias creates command aliases. If no arguments are specified it lists the current aliases. If one argument is specified, then that alias is removed. If two arguements are specified, then the first is the name of the alias, and the rest is the aliased command")
+	addCommand("Alias", c.CmdAlias, "Create a command alias", "Usage: Alias [name] [command...]\n\nAlias creates command aliases. If no arguments are specified it lists the current aliases. If one argument is specified, then that alias is removed. If two arguements are specified, then the first is the name of the alias, and the rest is the aliased command. An alias may contain placeholders of the form $1 to $9 which are replaced with the corresponding arguments to the alias when it is executed. The placeholder $* is replaced with all the arguments separated by a space")
 	addCommand("Elastic", c.CmdElastic, "Enable or disable elastic tab stops", "Usage: Elastic\nElastic off\n\nWhen run with no argument, elastic tab stops are enabled for the window body. When run with the argument 'off', elastic tab stops are disabled.")
 }
 
@@ -203,6 +210,25 @@ If the argument 'off' is passed, the debug server is stopped.
 
 [1] https://pkg.go.dev/net/http/pprof
 	`)
+	addCommand("Paths", c.CmdDbgPaths, "Print window paths", "Print window paths")
+	addCommand("Flame", c.CmdDbgFlame, "Profile CPU and show flame graph", "With the argument 'on' this command starts CPU profiling. When run with the command 'off' it stops CPU profiling and serves an SVG flame graph on a newly created HTTP server. With the command 'kill' it kills the running HTTP server.")
+}
+
+func (c CommandExecutor) addCommandlistToHelp() {
+	var text bytes.Buffer
+	var names []string
+	for k := range c.commands {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+
+	for _, k := range names {
+		v := c.commands[k]
+		fmt.Fprintf(&text, "%s  (◊Help %s◊)\n\t%s\n", k, k, v.shortHelp)
+	}
+	text.WriteRune('\n')
+
+	AddHelp("Commands", text.String())
 }
 
 func (c CommandExecutor) Do(cmd string, ctx *CmdContext) {
@@ -354,56 +380,36 @@ func (c CommandExecutor) CmdNew(ctx *CmdContext) {
 	}
 	path = strings.TrimSpace(path)
 
-	var loadPath *GlobalPath
-	var displayPath *GlobalPath
-	var err error
-	if path != "" {
-		loadPath, displayPath = completeDisplayAndLoadPaths(ctx.Completer, path)
-	} else {
-		loadPath = NewGlobalPath("", GlobalPathUnknown)
-		displayPath = loadPath.Clone()
+	path, seek, err := parseSeekFromFilename(path)
+	if err != nil {
+		editor.AppendError("", fmt.Sprintf("Parsing seek failed: %v", err))
 	}
-
-	var w *Window
-	if path != "" {
-		w = editor.FindWindowForFileAndDisplay(loadPath.String())
-		if w != nil {
-			// TODO: Warp pointer to here
-			w.showIfHidden()
-			w.SetFocus(ctx.Gtx)
-			w.GrowIfBodyTooSmall()
-			return
-		}
-	}
-
-	w = editor.NewWindow(c.column())
-	if w == nil {
-		return
-	}
-	w.markTextAsUnchanged()
-
-	w.SetPathsAndTag(displayPath, loadPath)
 
 	if path == "" {
-		w.SetFocus(ctx.Gtx)
-		return
-	}
-
-	gdirOfError := ctx.Completer.Dir()
-	dirOfError := gdirOfError.String()
-
-	err = w.LoadFile(displayPath, loadPath)
-	if err != nil {
-		e, ok := err.(*fs.PathError)
-		// Don't consider the file not existing as fatal, in case of the New command
-		if ok && !errors.Is(e, fs.ErrNotExist) {
-			w.col.markForRemoval(w)
-			editor.AppendError(dirOfError, err.Error())
+		loadPath := NewGlobalPath("", GlobalPathUnknown)
+		displayPath := loadPath.Clone()
+		w := editor.NewWindow(c.column())
+		if w == nil {
 			return
 		}
+		w.markTextAsUnchanged()
+		w.SetPathsAndTag(displayPath, loadPath)
+		w.SetFocus(ctx.Gtx)
+		return
+
 	}
 
-	w.SetFocus(ctx.Gtx)
+	loadPath, displayPath := completeDisplayAndLoadPaths(ctx.Completer, path)
+
+	var opts LoadFileOpts
+	if !seek.empty() {
+		opts = LoadFileOpts{GoTo: seek, SelectBehaviour: selectText, GrowBodyBehaviour: dontGrowBodyIfTooSmall}
+	}
+	w := editor.LoadFileOpts(displayPath, loadPath, opts)
+	if w != nil {
+		w.SetFocus(ctx.Gtx)
+	}
+
 	editor.notifyFileOpened(w)
 }
 
@@ -437,6 +443,17 @@ func (c CommandExecutor) CmdAcq(ctx *CmdContext) {
 		path = ctx.CombinedArgs()
 	}
 
+	if plumber != nil {
+		plumbed, err := plumber.Plumb(path, &c, ctx)
+		if err != nil {
+			log(LogCatgCmd, "CommandExecutor: Error plumbing: %v\n", err)
+		}
+
+		if plumbed {
+			return
+		}
+	}
+
 	path, seek, err := parseSeekFromFilename(path)
 	if err != nil {
 		editor.AppendError("", fmt.Sprintf("Parsing seek failed: %v", err))
@@ -453,17 +470,6 @@ func (c CommandExecutor) CmdAcq(ctx *CmdContext) {
 		w.SetPathsAndTag(displayPath, loadPath)
 		w.SetFocus(ctx.Gtx)
 		return
-	}
-
-	if plumber != nil {
-		plumbed, err := plumber.Plumb(path, &c, ctx)
-		if err != nil {
-			log(LogCatgCmd, "CommandExecutor: Error plumbing: %v\n", err)
-		}
-
-		if plumbed {
-			return
-		}
 	}
 
 	var opts LoadFileOpts
@@ -1382,6 +1388,10 @@ func (c CommandExecutor) CmdPutall(ctx *CmdContext) {
 	editor.Putall()
 }
 
+func (c CommandExecutor) CmdGetall(ctx *CmdContext) {
+	editor.Getall()
+}
+
 func (c CommandExecutor) CmdRecent(ctx *CmdContext) {
 	s := strings.Join(editor.RecentFiles(), "\n")
 	editor.AppendError("", s)
@@ -1498,22 +1508,7 @@ func (c CommandExecutor) CmdHelp(ctx *CmdContext) {
 		return
 	}
 
-	var text bytes.Buffer
-	fmt.Fprintf(&text, "%s", topLevelHelpString())
-
-	var names []string
-	for k := range c.commands {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-
-	for _, k := range names {
-		v := c.commands[k]
-		fmt.Fprintf(&text, "%s  (◊Help %s◊)\n\t%s\n", k, k, v.shortHelp)
-	}
-	text.WriteRune('\n')
-
-	editor.AppendError("", text.String())
+	editor.AppendError("", topLevelHelpString())
 }
 
 func (c CommandExecutor) CmdRot(ctx *CmdContext) {
@@ -1613,6 +1608,47 @@ func (c CommandExecutor) CmdFont(ctx *CmdContext) {
 	}
 }
 
+func (c CommandExecutor) CmdFontSize(ctx *CmdContext) {
+	win, ok := c.source.(*Window)
+	if !ok {
+		editor.AppendError("", "FontSize only works in window tags or bodies")
+		return
+	}
+
+	if len(ctx.Args) == 0 {
+		return
+	}
+
+	v := ctx.Args[0]
+	v = strings.TrimSpace(v)
+
+	rel := false
+	if strings.HasPrefix(v, "-") || strings.HasPrefix(v, "+") {
+		rel = true
+	}
+	size, err := strconv.Atoi(v)
+	if err != nil {
+		editor.AppendError("", "FontSize expects a numeric argument")
+		return
+	}
+
+	style := win.Body.adapter.style()
+	for i := range style.Fonts {
+		if rel {
+			style.Fonts[i].FontSize += unit.Sp(size)
+		} else {
+			style.Fonts[i].FontSize = unit.Sp(size)
+		}
+
+		if style.Fonts[i].FontSize < 1 {
+			style.Fonts[i].FontSize = 1
+		}
+	}
+	win.Body.adapter.setStyle(style)
+	editor.SignalRedrawRequired()
+
+}
+
 func (c CommandExecutor) CmdOn(ctx *CmdContext) {
 	if len(ctx.Args) < 2 {
 		editor.AppendError("", "The On command needs at least two arguments: the directory and the command")
@@ -1678,6 +1714,13 @@ func (c CommandExecutor) CmdWins(ctx *CmdContext) {
 }
 
 func (c CommandExecutor) CmdOnly(ctx *CmdContext) {
+
+	const (
+		equal = iota
+		above
+		below
+	)
+
 	switch v := c.source.(type) {
 	case Window:
 	case *Window:
@@ -1685,12 +1728,27 @@ func (c CommandExecutor) CmdOnly(ctx *CmdContext) {
 			return
 		}
 
+		keep := equal
+		if len(ctx.Args) > 0 {
+			switch ctx.Args[0] {
+			case "above":
+				keep = above
+			case "below":
+				keep = below
+			}
+		}
+
+		found := false
 		wins := make([]*Window, 0, len(v.col.Windows))
 		for _, w := range v.col.Windows {
 			if w == v {
+				found = true
 				continue
 			}
-			wins = append(wins, w)
+
+			if (keep == above && found) || (keep == below && !found) || keep == equal {
+				wins = append(wins, w)
+			}
 		}
 
 		c.delWindows(wins...)
@@ -1758,6 +1816,65 @@ func (c CommandExecutor) CmdDbgPsrv(ctx *CmdContext) {
 		return
 	}
 	startPprofDebugServer()
+}
+
+func (c CommandExecutor) CmdDbgPaths(ctx *CmdContext) {
+	switch v := c.source.(type) {
+	case Window:
+	case *Window:
+		msg := fmt.Sprintf("window display path: '%s' load path: '%s'", v.DisplayPath(), v.LoadPath())
+		editor.AppendError("", msg)
+	}
+}
+
+var (
+	flameGraphBuf *bytes.Buffer
+	flameServer   *http.Server
+)
+
+func (c CommandExecutor) CmdDbgFlame(ctx *CmdContext) {
+	if len(ctx.Args) == 0 {
+		editor.AppendError("", "Dbg Flame expects an argument of 'on' or 'off'")
+		return
+	}
+
+	switch ctx.Args[0] {
+	case "on":
+		flameGraphBuf = new(bytes.Buffer)
+		pprof.StartCPUProfile(flameGraphBuf)
+		editor.AppendError("", "started sampling")
+	case "off":
+		if flameGraphBuf == nil {
+			return
+		}
+		pprof.StopCPUProfile()
+		stacks, err := flamegraph.BuildSamplesFromPProfCPUProfile(flameGraphBuf)
+		if err != nil {
+			msg := fmt.Sprintf("building samples from CPU profile failed: %v", err)
+			editor.AppendError("", msg)
+			return
+		}
+
+		flameGraphBuf.Reset()
+		flamegraph.Render(stacks, flameGraphBuf)
+		var url string
+		url, flameServer, err = serveFlamegraph(flameGraphBuf.Bytes())
+		if err != nil {
+			editor.AppendError("", fmt.Sprintf("serving flame graph failed: %v", err))
+			flameServer = nil
+			return
+		}
+		editor.AppendError("", fmt.Sprintf("Flame graph URL: %s", url))
+	case "kill":
+		if flameServer != nil {
+			flameServer.Close()
+		}
+	default:
+		editor.AppendError("", "Dbg Flame expects an argument of 'on' or 'off'")
+		return
+
+	}
+
 }
 
 func (c CommandExecutor) CmdHideCol(ctx *CmdContext) {

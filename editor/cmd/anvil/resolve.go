@@ -51,6 +51,37 @@ func NewPathCompleterForWindow(w *Window) *PathCompleter {
 	return NewPathCompleterWithType(pathCompleterForWindow, winPath, colPath)
 }
 
+// NewPathCompleterForWindowOmitWinPath creates a new completer whos type is
+// pathCompleterForWindow, but just resolves paths relative to the column's path
+// if it's set, or the current working directory if not. This is used to more intuitively
+// resolve paths when the user selects a portion of the current path of the window
+// from the window tag.
+func NewPathCompleterForWindowOmitWinPath(w *Window) *PathCompleter {
+	winPath := w.LoadPath()
+	if w.col == nil {
+		return NewPathCompleterWithType(pathCompleterForWindow)
+	}
+
+	colPath, ok := w.col.Path()
+	if !ok {
+		if winPath.IsRemote() {
+			// If the window is remote, we want to resolve partial paths to
+			// that remote host. Since remote window paths are always absolute we
+			// don't need to worry about the resolving a relative path using a relative
+			// window path as the base and so end up with the non-intuitive resolution
+			// we are trying to prevent.
+			return NewPathCompleterWithType(pathCompleterForWindow, winPath)
+		}
+		return NewPathCompleterWithType(pathCompleterForWindow)
+	}
+
+	if winPath.IsRemote() {
+		return NewPathCompleterWithType(pathCompleterForWindow, winPath, colPath)
+	}
+
+	return NewPathCompleterWithType(pathCompleterForWindow, colPath)
+}
+
 func NewPathCompleterForColumn(c *Col) *PathCompleter {
 	colPath, ok := c.Path()
 	if !ok {

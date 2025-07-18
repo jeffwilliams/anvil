@@ -429,6 +429,8 @@ func (e *Editor) colWidth(colIndex int) float32 {
 func (l *editorLayouter) layout(gtx layout.Context) {
 	l.gtx = gtx
 
+	l.fillBackground(gtx)
+
 	// Already saves stack state
 	tagDims := l.ed.Tag.layout(gtx)
 
@@ -445,6 +447,14 @@ func (l *editorLayouter) layout(gtx layout.Context) {
 	st.Pop()
 
 	l.gtx = layout.Context{}
+}
+
+func (l *editorLayouter) fillBackground(gtx layout.Context) {
+	paint.ColorOp{Color: color.NRGBA(l.style.BodyBgColor)}.Add(gtx.Ops)
+	st := drawFilledBox(gtx, float32(gtx.Constraints.Max.X), float32(gtx.Constraints.Max.Y))
+	paint.PaintOp{}.Add(gtx.Ops)
+	st.Pop()
+
 }
 
 func (l *editorLayouter) offset(x, y int) op.TransformStack {
@@ -896,6 +906,16 @@ func (e *Editor) Putall() {
 		for _, w := range c.Windows {
 			if w.fileType == typeFile && !w.IsErrorsWindow() {
 				w.Put()
+			}
+		}
+	}
+}
+
+func (e *Editor) Getall() {
+	for _, c := range e.Cols {
+		for _, w := range c.Windows {
+			if w.fileType == typeFile && !w.IsErrorsWindow() {
+				w.Get()
 			}
 		}
 	}

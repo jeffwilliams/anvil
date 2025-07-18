@@ -116,6 +116,7 @@ A common idiom for copying text is to cut and paste in place with the mouse. Use
 | CTRL-E          | Scroll up a line |
 | CTRL-F          | Complete filename |
 | CTRL-G          | Get |
+| CTRL-H          | Complete command or substitute next completion |
 | CTRL-K          | Delete from the current cursor position to the end of the line |
 | CTRL-L          | Surround each selection with Lozenge (◊) characters |
 | CTRL-N          | Complete word or substitute next completion |
@@ -142,7 +143,7 @@ A common idiom for copying text is to cut and paste in place with the mouse. Use
 
 * If there are an even number of cursors present and you type a type of bracket (one of '(', '<', '{', or '\[') then each second cursor will instead type the matching closing bracket. If you then undo, it will convert the second brackets back to the originally typed bracket.
 
-## Addressing Expressions
+## Range Statements
 
 Executing text of the form `!...` executes an expression that selects and manipulates text in the Body of a window. The expression consists of a series of basic operations that are executed in series. Some operations select text, and some perform a command on the selected text. Those that select text perform their selection relative to the previous selections in the expression. The first selection in the expression operates relative to each of the current selections in the window body, and if there are no previous selection the entire text of the window body is used.
 

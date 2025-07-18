@@ -18,6 +18,7 @@ import (
 	"gioui.org/font"
 	"github.com/jeffwilliams/anvil/editor/internal/ansi"
 	adebug "github.com/jeffwilliams/anvil/editor/internal/debug"
+	"github.com/jeffwilliams/anvil/editor/internal/draw"
 	"github.com/jeffwilliams/anvil/editor/internal/expr"
 	"github.com/jeffwilliams/anvil/editor/internal/typeset"
 	"github.com/ogier/pflag"
@@ -33,6 +34,7 @@ var optPixelSizeFonts = pflag.BoolP("fonts-in-pixels", "f", false, "Consider fon
 var optVersion = pflag.BoolP("version", "", false, "Print version")
 
 func main() {
+	SetDefaultCursorProg()
 	parseAndValidateOptions()
 
 	if *optVersion {
@@ -103,6 +105,7 @@ func LoadStyle() {
 
 var settingsLoadedFromFile bool
 var settings = Settings{
+	Alias: make(map[string]string),
 	Ssh: SshSettings{
 		Shell:             "sh",
 		CacheSize:         5,
@@ -148,6 +151,59 @@ func HirePlumberUsingFile(path string) error {
 	return nil
 }
 
+const DefaultCursorProg = `
+color(0,0,0,255);
+begin;
+move(-3,0);
+line(7,0);
+line(0,3);
+line(-2,0);
+line(0,lh);
+line(0,-6);
+line(2, 0);
+line(0, 3);
+line(-7, 0);
+line(0, -3);
+line(2, 0);
+line(0, -lh);
+line(0, 6);
+line(-2, 0);
+line(0, -3);
+close;
+color(240,240,240,255);
+begin;
+move(-2, 1);
+line(5, 0);
+line(0, 1);
+line(-2, 0);
+line(0, lh);
+line(0, -4);
+line(2, 0);
+line(0, 1);
+line(-5, 0);
+line(0, -1);
+line(2, 0);
+line(0, -lh);
+line(0, 4);
+line(-2, 0);
+line(0, 1);
+close;
+`
+
+func ParseDefaultCursorProg() ([]draw.Op, error) {
+	return draw.Parse(DefaultCursorProg)
+}
+
+func SetDefaultCursorProg() {
+	ops, err := ParseDefaultCursorProg()
+	if err != nil {
+		fmt.Printf("parsing default cursor program failed: %v\n", err)
+		os.Exit(1)
+	}
+	WindowStyle.compiledCursorProg = ops
+	WindowStyle.CursorProg = DefaultCursorProg
+}
+
 // https://colorhunt.co/palette/1624471f40681b1b2fe43f5a
 var WindowStyle = Style{
 	Fonts: []FontStyle{
@@ -172,6 +228,7 @@ var WindowStyle = Style{
 	LayoutBoxBgColor:                MustParseHexColor("#6B778D"),
 	ScrollFgColor:                   MustParseHexColor("#17223B"),
 	ScrollBgColor:                   MustParseHexColor("#6B778D"),
+	ScrollBorderColor:               MustParseHexColor("#6B778D"),
 	WinBorderColor:                  MustParseHexColor("#000000"),
 	WinBorderWidth:                  2,
 	GutterWidth:                     14,
@@ -375,6 +432,11 @@ func handleEvent(e event.Event) {
 	var ops op.Ops
 	switch e := e.(type) {
 	case app.DestroyEvent:
+		if e.Err != nil {
+			fmt.Fprintf(os.Stderr, "Received DestroyEvent due to the following error: %s\n", e.Err)
+			fmt.Fprintf(os.Stderr, "Aborting\n")
+			Exit(1)
+		}
 		Exit(0)
 	case app.FrameEvent:
 		application.SetMetric(e.Metric)

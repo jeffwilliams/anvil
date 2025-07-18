@@ -57,6 +57,8 @@ func main() {
 		load()
 	case ActionClear:
 		clear()
+	case ActionList:
+		list()
 	}
 
 }
@@ -67,6 +69,7 @@ const (
 	ActionDump = iota
 	ActionLoad
 	ActionClear
+	ActionList
 )
 
 func action() (actionType, error) {
@@ -81,6 +84,8 @@ func action() (actionType, error) {
 		return ActionDump, nil
 	case "load":
 		return ActionLoad, nil
+	case "list":
+		return ActionList, nil
 	default:
 		return 0, fmt.Errorf("unknown action '%s'", pflag.Arg(0))
 	}
@@ -121,7 +126,6 @@ func dump() {
 	if anvilCwd == "" {
 		die("ada: unable to determine Anvil's working directory")
 	}
-	fmt.Printf("Anvil cwd: %s\n", anvilCwd)
 	anvilTitle = info.Title
 
 	os.Mkdir(dumpDir, 0755)
@@ -139,7 +143,6 @@ func dump() {
 		os.Remove(metaPath)
 		dieIfError(err, fmt.Sprintf("asm: saving metainfo failed: %s", err))
 	}
-
 }
 
 func saveMetaInfoFile(path string) error {
@@ -176,6 +179,14 @@ func load() {
 		if err != nil {
 			fmt.Printf("asm: error running Anvil with dumpfile '%s': %v\n", name, err)
 		}
+	}
+}
+
+func list() {
+	names, err := dumpfilesInDumpdir()
+	dieIfError(err, fmt.Sprintf("asm: listing dumpfiles failed: %s", err))
+	for _, name := range names {
+		fmt.Printf("%s\n", name)
 	}
 }
 
@@ -216,8 +227,6 @@ func calcDumpfileAndMetaInfoName() (dumpFile, metaFile string) {
 	}
 
 	d := cleanFilename(anvilCwd)
-
-	fmt.Printf("calcDumpfileAndMetaInfoName(1): d = %s\n", d)
 
 	t := cleanFilename(anvilTitle)
 

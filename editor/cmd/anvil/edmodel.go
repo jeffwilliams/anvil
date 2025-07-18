@@ -31,6 +31,7 @@ type editableModel struct {
 	overridingCursorIndices  []int
 	wordCompletion           completion
 	fileCompletion           completion
+	commandCompletion        completion
 	manualHighlighting       []*SyntaxInterval
 	runeOffsetCache          runes.OffsetCache
 	matchingBracketInsertion matchingBracketInsertion
@@ -103,6 +104,9 @@ func (e *editableModel) removeFirstNRunes(doc []byte, runeOffset int) (data []by
 	byteOffset, err, runeCount := e.runeOffsetCache.Get(doc, runeOffset)
 	if err != nil {
 		log(LogCatgEd, "RuneOffsetCache.Get returned error: %v\n", err)
+	}
+	if byteOffset >= len(doc) {
+		return
 	}
 	data = doc[byteOffset:]
 	return
@@ -250,6 +254,7 @@ func (e *editableModel) shiftManualHighlightsDueToTextModification(startOfChange
 func (e *editableModel) shiftCompletersDueToTextModification(startOfChange, lengthOfChange int) {
 	e.wordCompletion.shiftDueToTextModification(startOfChange, lengthOfChange)
 	e.fileCompletion.shiftDueToTextModification(startOfChange, lengthOfChange)
+	e.commandCompletion.shiftDueToTextModification(startOfChange, lengthOfChange)
 }
 
 type changeAtSelectionBoundsBehaviour int

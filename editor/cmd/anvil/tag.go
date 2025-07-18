@@ -19,8 +19,9 @@ func (t *Tag) Init(body *Body, style blockStyle, editableStyle editableStyle, ex
 	}
 	t.PreventScrolling = true
 	t.SetAdapter(&editableAdapter{
-		executor: executor,
-		owner:    owner,
+		executor:                        executor,
+		owner:                           owner,
+		omitWindowPathWhenResolvingPath: true,
 	})
 	t.AddTextChangeListener(t.highlightBasenameOnTextChange)
 }

@@ -16,17 +16,15 @@ import (
 
 	"math"
 
-	"gioui.org/f32"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
-	"gioui.org/op/clip"
-	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"github.com/jeffwilliams/anvil/editor/internal/ansi"
+	"github.com/jeffwilliams/anvil/editor/internal/draw"
 	"github.com/jeffwilliams/anvil/editor/internal/expr"
 	"github.com/jeffwilliams/anvil/editor/internal/intvl"
 	"github.com/jeffwilliams/anvil/editor/internal/pctbl"
@@ -82,10 +80,11 @@ type editable struct {
 }
 
 type editableStyle struct {
-	Fonts       []FontStyle
-	FgColor     Color
-	BgColor     Color
-	LineSpacing unit.Dp
+	Fonts              []FontStyle
+	FgColor            Color
+	BgColor            Color
+	LineSpacing        unit.Dp
+	compiledCursorProg []draw.Op
 
 	PrimarySelection   textStyle
 	SecondarySelection textStyle
@@ -109,6 +108,7 @@ func (e *editable) Init(style editableStyle) {
 	e.CursorIndices = []int{0}
 	e.wordCompletion = NewCompletion(e)
 	e.fileCompletion = NewCompletion(e)
+	e.commandCompletion = NewCompletion(e)
 	e.recentlyTypedText.start = -1
 	e.wrap = true
 }
@@ -189,6 +189,7 @@ func (e *editable) KeyPress(gtx layout.Context, ev *key.Event) {
 
 	resetWordCompletions := true
 	resetFileCompletions := true
+	resetCommandCompletions := true
 	clearRecentlyTypedText := false
 	clearLastKeypressWasSearch := true
 
@@ -207,7 +208,7 @@ func (e *editable) KeyPress(gtx layout.Context, ev *key.Event) {
 				text = text[l : len(text)-l]
 			}
 
-			if IsErrorsWindow(e.adapter.displayPath().String()) {
+			if e.adapter.displayPath() != nil && IsErrorsWindow(e.adapter.displayPath().String()) {
 				w := runes.NewWalker(e.Bytes())
 				w.SetRunePosCache(e.firstCursorIndex(), &e.runeOffsetCache)
 				if w.AtEnd() {
@@ -502,6 +503,13 @@ func (e *editable) KeyPress(gtx layout.Context, ev *key.Event) {
 				ctx := e.filenameObjectToComplete(ndx)
 				e.doFilenameCompletion(ctx, Reverse)
 			}
+
+			if e.commandCompletion.isCompletionInProgress() {
+				resetCommandCompletions = false
+				ndx := e.firstCursorIndex()
+				ctx := e.filenameObjectToComplete(ndx)
+				e.doCommandCompletion(ctx, Reverse)
+			}
 			clearRecentlyTypedText = true
 		}
 	case "F":
@@ -510,6 +518,14 @@ func (e *editable) KeyPress(gtx layout.Context, ev *key.Event) {
 			ndx := e.firstCursorIndex()
 			ctx := e.filenameObjectToComplete(ndx)
 			e.doFilenameCompletion(ctx, Forward)
+			clearRecentlyTypedText = true
+		}
+	case "H":
+		if ev.Modifiers.Contain(key.ModCtrl) {
+			resetCommandCompletions = false
+			ndx := e.firstCursorIndex()
+			ctx := e.filenameObjectToComplete(ndx)
+			e.doCommandCompletion(ctx, Forward)
 			clearRecentlyTypedText = true
 		}
 	case "S":
@@ -727,6 +743,9 @@ func (e *editable) KeyPress(gtx layout.Context, ev *key.Event) {
 	}
 	if resetFileCompletions {
 		e.fileCompletion.Reset()
+	}
+	if resetCommandCompletions {
+		e.commandCompletion.Reset()
 	}
 	if clearRecentlyTypedText {
 		e.ClearRecentlyTypedText()
@@ -1076,6 +1095,7 @@ func (e *editable) Pointer(gtx layout.Context, ev *pointer.Event) {
 	log(LogCatgEd, "%s: pointer event: %s\n", e.label, e.pointerEventString(ev))
 	e.wordCompletion.Reset()
 	e.fileCompletion.Reset()
+	e.commandCompletion.Reset()
 	e.invalidateLayedoutText()
 	e.InitPointerEventHandlers()
 	e.pointerState.Event(ev, gtx)
@@ -1127,6 +1147,10 @@ func (e *editable) ScrollOneLine(gtx layout.Context, d verticalDirection) {
 	}
 	posAfter := w.RunePos()
 	if posBefore == posAfter {
+		return
+	}
+	// Prevent scrolling outside body
+	if posAfter >= e.Len() {
 		return
 	}
 
@@ -1641,6 +1665,10 @@ func (e *editable) onPointerSecondaryButtonPress(ps *PointerState) {
 
 	determineAction := func() (action int) {
 
+		if ps.currentPointerEvent.runeIndex == e.Len() {
+			return noop
+		}
+
 		action = acquire
 		if pointerEventsOccurredAtAlmostSamePlace(&ps.currentPointerEvent, &ps.lastPointerEvent) &&
 			ps.lastPressEvent.set &&
@@ -1972,30 +2000,9 @@ func (e *editable) onPointerScroll(ps *PointerState) {
 		direction = Up
 	}
 
-	if ps.currentPointerEvent.Modifiers&key.ModCtrl > 0 {
-		e.adjustFontSizeOnScroll(direction)
-		return
-	}
-
 	for i := 0; i < 3; i++ {
 		e.ScrollOneLine(ps.gtx, direction)
 	}
-}
-
-func (e *editable) adjustFontSizeOnScroll(direction verticalDirection) {
-	style := e.adapter.style()
-	for i := range style.Fonts {
-		d := 1
-		if direction == Down {
-			d = -1
-		}
-		style.Fonts[i].FontSize += unit.Sp(d)
-		if style.Fonts[i].FontSize < 1 {
-			style.Fonts[i].FontSize = 1
-		}
-	}
-	e.adapter.setStyle(style)
-
 }
 
 func (e *editable) prepareStylesChanges(gtx layout.Context) {
@@ -2363,73 +2370,12 @@ func (e *editable) applyStyleFor(c []intvl.Interval) {
 }
 
 func (e *editable) drawCursor(gtx layout.Context) {
-	var path clip.Path
-
-	lh := float32(e.lineHeight())
-
-	pt := func(x, y int) f32.Point {
-		xi := gtx.Metric.Dp(unit.Dp(x))
-		yi := gtx.Metric.Dp(unit.Dp(y))
-		return f32.Pt(float32(xi), float32(yi))
+	lhInDp := float32(gtx.Metric.PxToDp(e.lineHeight()))
+	consts := map[draw.Const]float32{
+		draw.ConstLineHeight:    lhInDp,
+		draw.ConstNegLineHeight: -lhInDp,
 	}
-
-	// Outer path
-	path.Begin(gtx.Ops)
-	path.Move(pt(-3, 0))
-
-	path.Line(pt(7, 0))
-	path.Line(pt(0, 3))
-	path.Line(pt(-2, 0))
-	// Move down line height less 6
-	path.Line(f32.Pt(0, lh))
-	path.Line(pt(0, -6))
-	path.Line(pt(2, 0))
-	path.Line(pt(0, 3))
-	path.Line(pt(-7, 0))
-	path.Line(pt(0, -3))
-	path.Line(pt(2, 0))
-	// Move up line height less 6
-	path.Line(f32.Pt(0, -lh))
-	path.Line(pt(0, 6))
-	path.Line(pt(-2, 0))
-	path.Line(pt(0, -3))
-	path.Close()
-
-	stack := clip.Outline{Path: path.End()}.Op().Push(gtx.Ops)
-
-	paint.ColorOp{Color: color.NRGBA{A: 0xff}}.Add(gtx.Ops)
-	paint.PaintOp{}.Add(gtx.Ops)
-
-	stack.Pop()
-
-	// Inner path
-	path.Begin(gtx.Ops)
-	path.Move(pt(-2, 1))
-
-	path.Line(pt(5, 0))
-	path.Line(pt(0, 1))
-	path.Line(pt(-2, 0))
-	path.Line(f32.Pt(0, lh))
-	path.Line(pt(0, -4))
-	path.Line(pt(2, 0))
-	path.Line(pt(0, 1))
-
-	path.Line(pt(-5, 0))
-	path.Line(pt(0, -1))
-	path.Line(pt(2, 0))
-	path.Line(f32.Pt(0, -lh))
-	path.Line(pt(0, 4))
-	path.Line(pt(-2, 0))
-	path.Line(pt(0, 1))
-
-	path.Close()
-
-	stack = clip.Outline{Path: path.End()}.Op().Push(gtx.Ops)
-
-	paint.ColorOp{Color: color.NRGBA{R: 0xf0, G: 0xf0, B: 0xf0, A: 0xff}}.Add(gtx.Ops)
-	paint.PaintOp{}.Add(gtx.Ops)
-
-	stack.Pop()
+	draw.Run(gtx, e.style.compiledCursorProg, consts)
 }
 
 func (e *editable) InsertText(text string) {
@@ -2838,7 +2784,11 @@ func (e *editable) doFilenameCompletion(ctx completionContext, direction directi
 		ctx := e.filenameObjectToComplete(ndx)
 		e.applyFilenameCompletions(completions, ctx, direction)
 	}
-	e.adapter.completeFilename(ctx.prefix, cb)
+	if e.fileCompletion.NeedCompletions() {
+		e.adapter.completeFilename(ctx.prefix, cb)
+	} else {
+		e.fileCompletion.ApplyCompletion(ctx, direction)
+	}
 }
 
 func (e *editable) applyFilenameCompletions(comps []string, ctx completionContext, direction direction) {
@@ -2851,11 +2801,42 @@ func (e *editable) applyFilenameCompletions(comps []string, ctx completionContex
 		moveCurrentWordToEndOfCompletions(comps)
 		e.fileCompletion.SetCompletions(e.convertStringsToWorders(comps))
 	}
+	e.fileCompletion.dir = e.adapter.dir()
 	e.fileCompletion.ApplyCompletion(ctx, direction)
 }
 
+func (e *editable) doCommandCompletion(ctx completionContext, direction direction) {
+	cb := func(completions []string) {
+		ndx := e.firstCursorIndex()
+		ctx := e.filenameObjectToComplete(ndx) // TODO: should we do something else here instead of filenameObjectToComplete?
+		e.applyCommandCompletions(completions, ctx, direction)
+	}
+	if e.commandCompletion.NeedCompletions() {
+		e.adapter.completeCommand(ctx.prefix, cb)
+	} else {
+		e.commandCompletion.ApplyCompletion(ctx, direction)
+	}
+}
+
+func (e *editable) applyCommandCompletions(comps []string, ctx completionContext, direction direction) {
+
+	moveCurrentWordToEndOfCompletions := func(comps []string) {
+		slice.FindAndMoveToEnd(comps, func(i int) bool { return comps[i] == ctx.word })
+	}
+
+	if e.commandCompletion.NeedCompletions() {
+		moveCurrentWordToEndOfCompletions(comps)
+		e.commandCompletion.SetCompletions(e.convertStringsToWorders(comps))
+	}
+	e.commandCompletion.dir = e.adapter.dir()
+	e.commandCompletion.ApplyCompletion(ctx, direction)
+}
+
 func (e *editable) makeExprHandler() *ExprHandler {
-	file := e.adapter.displayPath().String()
+	file := ""
+	if e.adapter.displayPath() != nil {
+		e.adapter.displayPath().String()
+	}
 	dir := e.adapter.dir()
 
 	data := e.text.Bytes()
