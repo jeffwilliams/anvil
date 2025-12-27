@@ -6,7 +6,7 @@ import (
 	"unicode/utf8"
 
 	"gioui.org/text"
-	"github.com/jeffwilliams/anvil/editor/internal/cache"
+	"github.com/timtadh/data-structures/hashtable"
 	"golang.org/x/image/math/fixed"
 )
 
@@ -38,7 +38,7 @@ type layouter struct {
 	newlineGlyph   text.Glyph
 	errors         []error
 	shaper         *text.Shaper
-	cache          cache.Cache[string, []Line]
+	cache          *hashtable.Hash
 	elastic        *elastic
 	cachingEnabled bool
 }
@@ -70,10 +70,9 @@ func (l *layouter) layout() Text {
 		// The cache is keyed by the unwrapped input line. We read all the way to the newline
 		// then check the cache for which lines that turns into.
 		if l.currentLineEmpty() && cachingEnabled && l.cachingEnabled {
-			// TODO: this []rune to string conversion should be avoided.
-			e := l.cache.Get(string(l.currentLine))
-			if e != nil {
-				lines := e.Val
+			e, err := l.cache.Get(runeSliceKey(l.currentLine))
+			if err == nil {
+				lines := e.([]Line)
 				// We already processed a line like this before.
 				// Advance the line length, but -1 because we just processed the first char of the next line.
 				l.forwardBy(len(l.currentLine) - 1)
@@ -218,8 +217,9 @@ func CalculateLineHeight(face text.FontFace, fontSize, extraLineGap int) (height
 
 func (l *layouter) shapeOneRune(r rune) (glyph text.Glyph, err error) {
 	params := text.Parameters{
-		Font:    l.constraints.FontFace.Font,
-		PxPerEm: fixed.I(l.constraints.FontSize),
+		Font:             l.constraints.FontFace.Font,
+		PxPerEm:          fixed.I(l.constraints.FontSize),
+		DisableSpaceTrim: true,
 	}
 
 	l.shaper.LayoutString(params, string(r))
@@ -234,6 +234,7 @@ func shapeOneRune(r rune, fontFace text.FontFace, fontSize int) (glyph text.Glyp
 	params := text.Parameters{
 		Font:    fontFace.Font,
 		PxPerEm: fixed.I(fontSize),
+		DisableSpaceTrim: true,
 	}
 
 	collection := []text.FontFace{fontFace}
@@ -276,13 +277,14 @@ func (l *layouter) cacheAndOutputLine() {
 
 func (l *layouter) cacheLine(line Line) {
 	if cachingEnabled && l.cachingEnabled {
-		// TODO: this []rune to string conversion should be avoided
-		s := string(l.currentLine)
-		e := l.cache.Get(s)
-		if e != nil {
-			e.Val = append(e.Val, line)
+		k := runeSliceKey(l.currentLine)
+		e, err := l.cache.Get(k)
+		if err == nil {
+			lines := e.([]Line)
+			lines = append(lines, line)
+			l.cache.Put(k, lines)
 		} else {
-			l.cache.Set(s, []Line{line})
+			l.cache.Put(k, []Line{line})
 		}
 	}
 }
@@ -295,8 +297,7 @@ func (l *layouter) outputLine() {
 }
 
 func (l *layouter) deleteCurrentLineFromCache() {
-	s := string(l.currentLine)
-	l.cache.Del(s)
+	l.cache.Remove(runeSliceKey(l.currentLine))
 }
 
 func (l *layouter) outputLines(lines []Line) {
@@ -386,6 +387,7 @@ func (l *layouter) beautifyLine(line *Line) {
 	params := text.Parameters{
 		Font:    l.constraints.FontFace.Font,
 		PxPerEm: fixed.I(l.constraints.FontSize),
+		DisableSpaceTrim: true,
 	}
 
 	l.shaper.LayoutString(params, string(line.runes))

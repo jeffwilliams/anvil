@@ -5,6 +5,8 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strings"
+	"time"
 
 	"gioui.org/app"
 	"gioui.org/io/event"
@@ -18,6 +20,7 @@ import (
 	"gioui.org/font"
 	"github.com/jeffwilliams/anvil/editor/internal/ansi"
 	adebug "github.com/jeffwilliams/anvil/editor/internal/debug"
+	"github.com/jeffwilliams/anvil/editor/internal/draw"
 	"github.com/jeffwilliams/anvil/editor/internal/expr"
 	"github.com/jeffwilliams/anvil/editor/internal/typeset"
 	"github.com/ogier/pflag"
@@ -28,11 +31,15 @@ const editorName = "anvil"
 var optProfile = pflag.BoolP("profile", "p", false, "Profile the code CPU usage. The profile file location is printed to stdout.")
 var optLoadDumpfile = pflag.StringP("load", "l", "", "Load state from the specified file that was created using Dump")
 var optChdir = pflag.StringP("cd", "d", "", "Change directory to the specified path before starting")
-var optDebugStdout = pflag.BoolP("dbg", "b", false, "Print debug logs to stdout")
+var optDebugStdout = pflag.BoolP("debug-stdout", "b", false, "Print debug logs to stdout")
+var optDebugToWindow = pflag.BoolP("debug-window", "g", false, "Print debug logs to +Errors window")
+var optDebugCategories = pflag.StringP("debug-catg", "c", "", fmt.Sprintf("One or more comma-separated categories to print when -b or -g are used. The supported categories are:\n  %s", strings.Join(debugLogCategories, "\n  ")))
 var optPixelSizeFonts = pflag.BoolP("fonts-in-pixels", "f", false, "Consider font sizes in pixels instead of device independent units")
 var optVersion = pflag.BoolP("version", "", false, "Print version")
 
 func main() {
+	help.addCommandMkdocsHelp()
+	SetDefaultCursorProg()
 	parseAndValidateOptions()
 
 	if *optVersion {
@@ -54,6 +61,7 @@ func main() {
 	printSyntaxLexerParseErrors()
 
 	LoadSettings()
+	InitKeymaps()
 	LoadStyle()
 	HirePlumber()
 	ansi.InitColors(WindowStyle.Ansi.AsColors())
@@ -103,6 +111,7 @@ func LoadStyle() {
 
 var settingsLoadedFromFile bool
 var settings = Settings{
+	Alias: make(map[string]string),
 	Ssh: SshSettings{
 		Shell:             "sh",
 		CacheSize:         5,
@@ -135,6 +144,14 @@ func HirePlumber() {
 	HirePlumberUsingFile(PlumbingConfigFile())
 }
 
+func InitKeymaps() {
+	err := initKeymaps()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Loading keymaps failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func HirePlumberUsingFile(path string) error {
 	rules, err := LoadPlumbingRulesFromFile(path)
 	if err != nil {
@@ -146,6 +163,59 @@ func HirePlumberUsingFile(path string) error {
 	plumber = NewPlumber(rules)
 	plumbingLoadedFromFile = true
 	return nil
+}
+
+const DefaultCursorProg = `
+color(0,0,0,255);
+begin;
+move(-3,0);
+line(7,0);
+line(0,3);
+line(-2,0);
+line(0,lh);
+line(0,-6);
+line(2, 0);
+line(0, 3);
+line(-7, 0);
+line(0, -3);
+line(2, 0);
+line(0, -lh);
+line(0, 6);
+line(-2, 0);
+line(0, -3);
+close;
+color(240,240,240,255);
+begin;
+move(-2, 1);
+line(5, 0);
+line(0, 1);
+line(-2, 0);
+line(0, lh);
+line(0, -4);
+line(2, 0);
+line(0, 1);
+line(-5, 0);
+line(0, -1);
+line(2, 0);
+line(0, -lh);
+line(0, 4);
+line(-2, 0);
+line(0, 1);
+close;
+`
+
+func ParseDefaultCursorProg() ([]draw.Op, error) {
+	return draw.Parse(DefaultCursorProg)
+}
+
+func SetDefaultCursorProg() {
+	ops, err := ParseDefaultCursorProg()
+	if err != nil {
+		fmt.Printf("parsing default cursor program failed: %v\n", err)
+		os.Exit(1)
+	}
+	WindowStyle.compiledCursorProg = ops
+	WindowStyle.CursorProg = DefaultCursorProg
 }
 
 // https://colorhunt.co/palette/1624471f40681b1b2fe43f5a
@@ -172,6 +242,7 @@ var WindowStyle = Style{
 	LayoutBoxBgColor:                MustParseHexColor("#6B778D"),
 	ScrollFgColor:                   MustParseHexColor("#17223B"),
 	ScrollBgColor:                   MustParseHexColor("#6B778D"),
+	ScrollBorderColor:               MustParseHexColor("#6B778D"),
 	WinBorderColor:                  MustParseHexColor("#000000"),
 	WinBorderWidth:                  2,
 	GutterWidth:                     14,
@@ -251,8 +322,8 @@ func dumpPanic(i interface{}) {
 	fmt.Fprintf(f, "%s", string(debug.Stack()))
 }
 
-func dumpLogs() {
-	fname := fmt.Sprintf("%s.panic-logs", editorName)
+func dumpLogs(extension string) {
+	fname := fmt.Sprintf("%s.%s", editorName, extension)
 	f, err := os.Create(fname)
 	if err != nil {
 		fmt.Printf("Opening file '%s' failed: %v\n", fname, err)
@@ -263,8 +334,8 @@ func dumpLogs() {
 	fmt.Fprintf(f, debugLog.String())
 }
 
-func dumpGoroutines() {
-	fname := fmt.Sprintf("%s.panic-gortns", editorName)
+func dumpGoroutines(extension string) {
+	fname := fmt.Sprintf("%s.%s", editorName, extension)
 
 	f, err := os.Create(fname)
 	if err != nil {
@@ -278,6 +349,12 @@ func dumpGoroutines() {
 	buf = buf[0:sz]
 
 	fmt.Fprintf(f, string(buf))
+}
+
+func dumpPanicFiles(panic interface{}) {
+	dumpPanic(panic)
+	dumpLogs("panic-logs")
+	dumpGoroutines("panic-gortns")
 }
 
 func initializeEditorToCurrentDirectory() {
@@ -315,9 +392,7 @@ func initializeEditorWithDumpfile(f string) {
 func loop(w *app.Window) {
 	defer func() {
 		if r := recover(); r != nil {
-			dumpPanic(r)
-			dumpLogs()
-			dumpGoroutines()
+			dumpPanicFiles(r)
 			panic(r)
 		}
 	}()
@@ -340,9 +415,7 @@ func loop(w *app.Window) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				dumpPanic(r)
-				dumpLogs()
-				dumpGoroutines()
+				dumpPanicFiles(r)
 				panic(r)
 			}
 		}()
@@ -350,9 +423,12 @@ func loop(w *app.Window) {
 		for {
 			select {
 			case e := <-events:
+				// startUIWatchdogTimer()
 				handleEvent(e)
 				acks <- struct{}{}
+				// stopUIWatchdogTimer()
 			case w := <-editor.WorkChan():
+				// startUIWatchdogTimer()
 				done := w.Service()
 				if done && w.Job() != nil {
 					editor.RemoveJob(w.Job())
@@ -362,6 +438,7 @@ func loop(w *app.Window) {
 				}
 
 				appWindow.Invalidate()
+				// stopUIWatchdogTimer()
 			}
 		}
 	}()
@@ -375,6 +452,11 @@ func handleEvent(e event.Event) {
 	var ops op.Ops
 	switch e := e.(type) {
 	case app.DestroyEvent:
+		if e.Err != nil {
+			fmt.Fprintf(os.Stderr, "Received DestroyEvent due to the following error: %s\n", e.Err)
+			fmt.Fprintf(os.Stderr, "Aborting\n")
+			Exit(1)
+		}
 		Exit(0)
 	case app.FrameEvent:
 		application.SetMetric(e.Metric)
@@ -397,6 +479,25 @@ func handleEvent(e event.Event) {
 		log(LogCatgUI, "window config changed: %v\n", e.Config)
 		application.WindowConfigChanged(&e.Config)
 	}
+}
+
+var uiWatchdogTimer *time.Timer
+
+func startUIWatchdogTimer() {
+	uiWatchdogTimer = time.AfterFunc(3*time.Second, dumpFilesOnUIWatchdogTimeout)
+}
+
+func stopUIWatchdogTimer() {
+	if uiWatchdogTimer == nil {
+		return
+	}
+
+	uiWatchdogTimer.Stop()
+}
+
+func dumpFilesOnUIWatchdogTimeout() {
+	dumpLogs("ui-freeze-logs")
+	dumpGoroutines("ui-freeze-gortns")
 }
 
 var editorInitParams = struct {
@@ -495,9 +596,24 @@ type EditorInitializationParams struct {
 	InitialFile  string
 }
 
+var categoriesToStream = make(map[string]struct{})
+var alreadyStreamingThisMessage = false
 func log(category, message string, args ...interface{}) {
-	if *optDebugStdout {
+	shouldStream := func() bool {
+		if len(categoriesToStream) == 0 {
+			return true
+		}
+		_, ok := categoriesToStream[category]
+		return ok
+	}
+
+	if *optDebugStdout && shouldStream() {
 		fmt.Printf(message, args...)
+	}
+	if *optDebugToWindow && shouldStream() && !alreadyStreamingThisMessage {
+		alreadyStreamingThisMessage = true
+		editor.Tag.adapter.appendError("", fmt.Sprintf(message, args...))
+		alreadyStreamingThisMessage = false
 	}
 	debugLog.Addf(category, message, args...)
 }
@@ -505,6 +621,13 @@ func log(category, message string, args ...interface{}) {
 func initDebugging() {
 	expr.Debug = func(message string, args ...interface{}) {
 		log(LogCatgExpr, message, args...)
+	}
+
+	if *optDebugCategories != "" {
+		parts := strings.Split(*optDebugCategories, ",")
+		for _, p := range parts {
+			categoriesToStream[strings.TrimSpace(p)] = struct{}{}
+		}
 	}
 }
 

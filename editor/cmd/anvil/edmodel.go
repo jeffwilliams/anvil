@@ -31,6 +31,7 @@ type editableModel struct {
 	overridingCursorIndices  []int
 	wordCompletion           completion
 	fileCompletion           completion
+	commandCompletion        completion
 	manualHighlighting       []*SyntaxInterval
 	runeOffsetCache          runes.OffsetCache
 	matchingBracketInsertion matchingBracketInsertion
@@ -104,6 +105,9 @@ func (e *editableModel) removeFirstNRunes(doc []byte, runeOffset int) (data []by
 	if err != nil {
 		log(LogCatgEd, "RuneOffsetCache.Get returned error: %v\n", err)
 	}
+	if byteOffset >= len(doc) {
+		return
+	}
 	data = doc[byteOffset:]
 	return
 }
@@ -117,29 +121,30 @@ func (e *editableModel) firstNRunes(doc []byte, n int) (data []byte, runeCount i
 	return
 }
 
-func (e *editableModel) textObjectForAcquireAt(runeIndex int) string {
+func (e *editableModel) textObjectForAcquireAt(runeIndex int) (string, textRange) {
 	return e.textObjectAt(runeIndex, false)
 }
 
-func (e *editableModel) textObjectForExecutionAt(runeIndex int) string {
+func (e *editableModel) textObjectForExecutionAt(runeIndex int) (string, textRange) {
 	return e.textObjectAt(runeIndex, true)
 }
 
-func (e *editableModel) textObjectForSearchAt(runeIndex int) string {
+func (e *editableModel) textObjectForSearchAt(runeIndex int) (string, textRange) {
 	return e.textObjectAt(runeIndex, true)
 }
 
-func (e *editableModel) textObjectAt(runeIndex int, considerLozenges bool) string {
+func (e *editableModel) textObjectAt(runeIndex int, considerLozenges bool) (string, textRange) {
 	w := runes.NewWalker(e.Bytes())
 	sel := e.selectionContaining(runeIndex)
 	if sel != nil {
-		return string(w.TextBetweenRuneIndicesCache(sel.start, sel.end, &e.runeOffsetCache))
+		return string(w.TextBetweenRuneIndicesCache(sel.start, sel.end, &e.runeOffsetCache)), textRange{sel.start, sel.end}
 	}
 
 	w.SetRunePosCache(runeIndex, &e.runeOffsetCache)
 
 	getWord := true
 	var s string
+	var tr textRange
 
 	if considerLozenges {
 		var wasDelimited bool
@@ -151,9 +156,11 @@ func (e *editableModel) textObjectAt(runeIndex int, considerLozenges bool) strin
 
 	if getWord {
 		s = w.CurrentWord()
+		start, end := w.CurrentWordBounds()
+		tr = textRange{start, end}
 	}
 
-	return s
+	return s, tr
 }
 
 type completionContext struct {
@@ -250,6 +257,7 @@ func (e *editableModel) shiftManualHighlightsDueToTextModification(startOfChange
 func (e *editableModel) shiftCompletersDueToTextModification(startOfChange, lengthOfChange int) {
 	e.wordCompletion.shiftDueToTextModification(startOfChange, lengthOfChange)
 	e.fileCompletion.shiftDueToTextModification(startOfChange, lengthOfChange)
+	e.commandCompletion.shiftDueToTextModification(startOfChange, lengthOfChange)
 }
 
 type changeAtSelectionBoundsBehaviour int

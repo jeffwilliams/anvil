@@ -1,0 +1,130 @@
+keymap base replace
+
+# Return. '⌤' is newline from the keypad
+map ⏎ newline
+map ⌤ newline
+map S-⏎ newline no-indent
+map S-⌤ newline no-indent
+map C-⏎ execute-line
+map C-⌤ execute-line
+map CA-⏎ clear-errors; execute-line 
+map CA-⌤ clear-errors; execute-line 
+
+map ⌫ backspace
+map ⌦ delete
+map Tab tab
+
+map ← move-left-rune
+map C-← move-left-chunk
+map S-← select-left-rune
+map CS-← select-left-chunk
+
+map → move-right-rune
+map C-→ move-right-chunk
+map S-→ select-right-rune
+map CS-→ select-right-chunk
+
+map ↑ move-up
+map S-↑ select-up
+map A-↑ new-cursor-above-first
+
+map ↓ move-down
+map S-↓ select-down
+map A-↓ new-cursor-below-last
+
+map ⇲ move-to-eol
+map S-⇲ select-to-eol
+map C-⇲ move-to-eof
+map CS-⇲ select-to-eof
+
+map ⇱ move-to-sol
+map S-⇱ select-to-sol
+map C-⇱ move-to-sof
+map CS-⇱ select-to-sof
+
+map ⇟ move-page-down
+map ⇞ move-page-up
+
+map C-Z undo
+map C-R redo
+
+map C-E scroll-line-up
+map C-Y scroll-line-down
+
+map C-N complete-word
+map C-P previous-completion
+map C-F complete-file
+map C-H complete-command
+
+map C-S put
+map C-G get
+
+map C-Q acquire
+map CA-Q acquire same-window
+
+map C-C copy
+map C-X cut
+map C-V paste
+
+map C-L add-lozenge
+map C-T execute
+map CA-T clear-errors; execute
+
+map C-/ search forward
+# GIO behaves differently here between Linux and Windows for the keystroke we 
+# want to use to search backwards. In Linux we get CTRL-SHIFT-?. In Windows we get 
+# CTRL-SHIFT-/.
+map CS-/ search reverse
+map CS-? search reverse
+
+map C-A select-all
+map C-D delimit-with-cursors
+map C-U delete-line
+map C-K delete-to-eol
+
+# On windows, GIO sends the event for pressing Ctrl with a Ctrl modifier,
+# and similarly for shift sents it with a Shift modifier
+map Ctrl pointer-cut-or-exec-with-arg
+map C-Ctrl pointer-cut-or-exec-with-arg
+map Shift pointer-paste
+map S-Shift pointer-paste
+
+map F1 pointer-save-or-goto-mark
+map F2 pointer-save-or-goto-mark
+map F3 pointer-save-or-goto-mark
+map F4 pointer-save-or-goto-mark
+map F5 pointer-save-or-goto-mark
+map F6 pointer-save-or-goto-mark
+map F7 pointer-save-or-goto-mark
+map F8 pointer-save-or-goto-mark
+map F9 pointer-save-or-goto-mark
+map F10 pointer-save-or-goto-mark
+map F11 pointer-save-or-goto-mark
+map F12 pointer-save-or-goto-mark
+
+map ⎋ cursor-at-selections-lines; halt-if-handled; reduce-cursors-to-one; halt-if-handled; select-recently-typed
+
+map C-W push window
+map C-Y push layer
+
+keymap window
+map 1 move-to-window-body
+map 2 move-to-window-tag
+map 3 move-to-column-tag
+map 4 move-to-editor-tag
+map ← move-to-window-on-left
+map → move-to-window-on-right
+map ↑ move-to-window-above
+map ↓ move-to-window-below
+default noop
+map ⎋ pop
+
+keymap layer
+map ↑ move-to-layer-above
+map ↓ move-to-layer-below
+map ⇱ set-layer 0
+map ⇲ move-to-highest-layer
+map N new-layer
+map D delete-layer
+default noop
+map ⎋ pop

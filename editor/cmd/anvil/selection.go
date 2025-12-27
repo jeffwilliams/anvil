@@ -63,6 +63,10 @@ func (s textRange) Overlaps(o *textRange) bool {
 	return intvl.Overlaps(s, o)
 }
 
+func (s textRange) Contains(o *textRange) bool {
+	return intvl.Contains(s, o)
+}
+
 func (s textRange) Valid() bool {
 	return s.end >= 0 && s.start >= 0 && s.end >= s.start
 }

@@ -3,7 +3,8 @@ package main
 import (
 	"path"
 	"path/filepath"
-	"strings"
+
+	"github.com/jeffwilliams/anvil/editor/internal/slice"
 )
 
 // FilenameCompletions returns any paths in `dir` that would complete the partial filename `base`.
@@ -103,25 +104,15 @@ FOR:
 		return
 	}
 
-	fnames = j.filesStartingWithBase(fnames)
+	fnames = slice.StringsHavingPrefix(fnames, j.base)
 	j.stripBase(fnames)
 	j.prependWord(fnames)
 
-	j.work <- &applyFilenameCompletionsToEditable{job: j,
+	j.work <- &applyCompletionsToEditable{job: j,
 		completions: fnames,
 		word:        j.word,
 		callback:    j.callback,
 	}
-}
-
-func (j FilenameCompletionJob) filesStartingWithBase(fnames []string) []string {
-	r := make([]string, 0, len(fnames))
-	for _, n := range fnames {
-		if strings.HasPrefix(n, j.base) {
-			r = append(r, n)
-		}
-	}
-	return r
 }
 
 func (j FilenameCompletionJob) stripBase(fnames []string) {
@@ -152,19 +143,19 @@ func (j FilenameCompletionJob) Name() string {
 	return "file-completion"
 }
 
-type applyFilenameCompletionsToEditable struct {
+type applyCompletionsToEditable struct {
 	job         Job
 	completions []string
 	word        string
 	callback    CompletionsCallback
 }
 
-func (l applyFilenameCompletionsToEditable) Service() (done bool) {
+func (l applyCompletionsToEditable) Service() (done bool) {
 	l.callback(l.completions)
 	return true
 }
 
-func (l applyFilenameCompletionsToEditable) Job() Job {
+func (l applyCompletionsToEditable) Job() Job {
 	return l.job
 }
 
@@ -205,5 +196,4 @@ func computeDirAndBaseForFilenameCompletion(fpath string, completer *PathComplet
 	dir = gpath.Dir().String()
 	base = baseFn(gpath.Path())
 	return
-
 }

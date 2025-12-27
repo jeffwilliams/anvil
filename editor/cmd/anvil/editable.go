@@ -8,7 +8,6 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -16,19 +15,18 @@ import (
 
 	"math"
 
-	"gioui.org/f32"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
-	"gioui.org/op/clip"
-	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"github.com/jeffwilliams/anvil/editor/internal/ansi"
+	"github.com/jeffwilliams/anvil/editor/internal/draw"
 	"github.com/jeffwilliams/anvil/editor/internal/expr"
 	"github.com/jeffwilliams/anvil/editor/internal/intvl"
+	"github.com/jeffwilliams/anvil/editor/internal/keymap"
 	"github.com/jeffwilliams/anvil/editor/internal/pctbl"
 	"github.com/jeffwilliams/anvil/editor/internal/regex"
 	"github.com/jeffwilliams/anvil/editor/internal/runes"
@@ -49,6 +47,7 @@ type editable struct {
 	styleChanges     intvl.IntervalIter
 
 	layedoutText *typeset.Text
+	visibleTextCache visibleTextCache
 
 	selectionBeingBuilt   *selection
 	lastSearchResult      *selection
@@ -69,23 +68,26 @@ type editable struct {
 	Scheduler             *Scheduler
 	maxSizeLastLayout     image.Point
 	// label is a name for this editable used for debugging
-	label                  string
-	completionSource       string
-	completionMaxDocSize   int
-	colorizeAnsiEscapes    bool
-	textChangedListeners   []func(*TextChange)
-	adapter                adapter
-	syntaxHighlightDelay   time.Duration
-	draggingTertiaryButton bool
-	wrap                   bool
-	elastic                bool
+	label                          string
+	completionSource               string
+	completionMaxDocSize           int
+	colorizeAnsiEscapes            bool
+	textChangedListeners           []func(*TextChange)
+	adapter                        adapter
+	syntaxHighlightDelay           time.Duration
+	draggingTertiaryButton         bool
+	wrap                           bool
+	elastic                        bool
+	shouldOmitWinPathWhenAcquiring func(*textRange) bool
+	keys                           *keymap.Stack
 }
 
 type editableStyle struct {
-	Fonts       []FontStyle
-	FgColor     Color
-	BgColor     Color
-	LineSpacing unit.Dp
+	Fonts              []FontStyle
+	FgColor            Color
+	BgColor            Color
+	LineSpacing        unit.Dp
+	compiledCursorProg []draw.Op
 
 	PrimarySelection   textStyle
 	SecondarySelection textStyle
@@ -109,8 +111,10 @@ func (e *editable) Init(style editableStyle) {
 	e.CursorIndices = []int{0}
 	e.wordCompletion = NewCompletion(e)
 	e.fileCompletion = NewCompletion(e)
+	e.commandCompletion = NewCompletion(e)
 	e.recentlyTypedText.start = -1
 	e.wrap = true
+	e.keys = &globalKeymapStack
 }
 
 func (e *editable) SetAdapter(a adapter) {
@@ -185,541 +189,53 @@ func (e *editable) KeyRelease(gtx layout.Context, ev *key.Event) {
 }
 
 func (e *editable) KeyPress(gtx layout.Context, ev *key.Event) {
-	log(LogCatgEd, "%s: keypress: %#v\n", e.label, ev)
+	e.logKeyPress(ev)
 
+	actions, ok := e.keys.Get(string(ev.Name), ev.Modifiers)
+	if ok {
+		e.executeKeypressActions(gtx, ev, actions)
+	}
+	editor.keyHandlingCoordination.keyEventHandlerProcessedLastKeyEvent = ok
+	editor.keyHandlingCoordination.keyEventHandlerCalledSinceEditEventHandlerCalled = true
+
+}
+
+func (e *editable) executeKeypressActions(gtx layout.Context, ev *key.Event, actions keymap.ActionIter) {
 	resetWordCompletions := true
 	resetFileCompletions := true
+	resetCommandCompletions := true
 	clearRecentlyTypedText := false
 	clearLastKeypressWasSearch := true
 
-	switch ev.Name {
-	case "⏎", "⌤":
-		// Enter, Numpad Enter
-		if ev.Modifiers.Contain(key.ModCtrl) {
+	state := actionProcessingState{lastHandlerReportedHandled: false}
 
-			w := runes.NewWalker(e.Bytes())
-			w.SetRunePosCache(e.firstCursorIndex(), &e.runeOffsetCache)
-			start, end := w.CurrentLineBounds()
-			text := string(w.TextBetweenRuneIndices(start, end))
-			text = strings.TrimSpace(text)
-			if strings.HasPrefix(text, "◊") && strings.HasSuffix(text, "◊") {
-				l := utf8.RuneLen('◊')
-				text = text[l : len(text)-l]
-			}
-
-			if IsErrorsWindow(e.adapter.displayPath().String()) {
-				w := runes.NewWalker(e.Bytes())
-				w.SetRunePosCache(e.firstCursorIndex(), &e.runeOffsetCache)
-				if w.AtEnd() {
-					e.InsertText("\n")
-				}
-			}
-
-			if ev.Modifiers.Contain(key.ModAlt) {
-				e.adapter.clearErrors()
-			}
-			e.adapter.execute(e, gtx, text, nil)
-			break
-		}
-
-		if len(e.CursorIndices) == 1 && !ev.Modifiers.Contain(key.ModShift) {
-			e.autoIndent()
-		} else {
-			e.InsertText("\n")
-		}
-
-	case "⌫":
-		// Backspace
-		if e.SelectionsPresent() {
-			e.InsertText("")
-			break
-		}
-
-		if len(e.CursorIndices) > 1 {
-			e.SetSaveDeletes(false)
-		}
-		e.text.StartTransaction()
-		for i, ndx := range e.CursorIndices {
-			if ndx > 0 {
-				e.CursorIndices[i]--
-				e.deleteFromPieceTable(e.CursorIndices[i], 1)
-				log(LogCatgEd, "Delete at %d of length %d\n", e.CursorIndices[i], 1)
-			}
-		}
-		e.text.EndTransaction()
-		e.SetSaveDeletes(true)
-	case "⌦":
-		// Delete
-		if e.SelectionsPresent() {
-			e.InsertText("")
-			break
-		}
-
-		for _, ndx := range e.CursorIndices {
-			if ndx < e.text.Len() {
-				e.deleteFromPieceTable(ndx, 1)
-			}
-		}
-	case "Tab":
-		// Tab
-		e.InsertText(e.adapter.insertWhenTabPressed())
-	case "←":
-		// Left
-		if e.SelectionsPresent() && !ev.Modifiers.Contain(key.ModShift) {
-			e.changeSelectionsToCursors(Left)
-			return
-		}
-
-		var mis motionItems
-		if ev.Modifiers.Contain(key.ModShift) {
-			mis = newSelectionMotionItems(e, Left)
-		} else {
-			mis = newCursorsMotionItems(e)
-		}
-
-		if ev.Modifiers.Contain(key.ModCtrl) && e.text.Len() > 0 {
-			w := runes.NewWalker(e.Bytes())
-			for _, mi := range mis.items() {
-				w.SetRunePosCache(mi.position(), &e.runeOffsetCache)
-				w.BackwardToWordStart()
-				mi.setPosition(w.RunePos())
-			}
-			mis.doneAdjusting(gtx)
-			break
-		}
-
-		for _, mi := range mis.items() {
-			if mi.position() > 0 {
-				p := mi.position()
-				p--
-				mi.setPosition(p)
-			}
-		}
-		mis.doneAdjusting(gtx)
-	case "→":
-		// Right
-		if e.SelectionsPresent() && !ev.Modifiers.Contain(key.ModShift) {
-			e.changeSelectionsToCursors(Right)
-			return
-		}
-
-		var mis motionItems
-		if ev.Modifiers.Contain(key.ModShift) {
-			mis = newSelectionMotionItems(e, Right)
-		} else {
-			mis = newCursorsMotionItems(e)
-		}
-
-		if ev.Modifiers.Contain(key.ModCtrl) && e.text.Len() > 0 {
-			w := runes.NewWalker(e.Bytes())
-			for _, mi := range mis.items() {
-				w.SetRunePosCache(mi.position(), &e.runeOffsetCache)
-				w.ForwardToStartOfNextWord()
-				mi.setPosition(w.RunePos())
-			}
-			mis.doneAdjusting(gtx)
-			break
-		}
-
-		for _, mi := range mis.items() {
-			if mi.position() < e.text.Len() {
-				p := mi.position()
-				p++
-				mi.setPosition(p)
-			}
-		}
-		mis.doneAdjusting(gtx)
-	case "↑":
-		// Up
-		if e.SelectionsPresent() && !ev.Modifiers.Contain(key.ModShift) {
-			e.changeSelectionsToCursors(Left)
-			return
-		}
-
-		var mis motionItems
-		if ev.Modifiers.Contain(key.ModShift) {
-			mis = newSelectionMotionItems(e, Right)
-		} else {
-			mis = newCursorsMotionItems(e)
-		}
-
-		if ev.Modifiers.Contain(key.ModAlt) && !e.SelectionsPresent() && len(e.CursorIndices) > 0 {
-			e.AddNewCursorAboveFirst()
-			break
-		}
-
-		w := runes.NewWalker(e.Bytes())
-		for _, mi := range mis.items() {
-			w.SetRunePosCache(mi.position(), &e.runeOffsetCache)
-			li := w.IndexInLine()
-			w.BackwardToStartOfLine()
-			w.Backward(1)
-			w.BackwardToStartOfLine()
-			if li >= w.LineLen() {
-				li = w.LineLen() - 1
-			}
-			w.Forward(li)
-			mi.setPosition(w.RunePos())
-		}
-		mis.doneAdjusting(gtx)
-	case "↓":
-		// Down
-		if e.SelectionsPresent() && !ev.Modifiers.Contain(key.ModShift) {
-			e.changeSelectionsToCursors(Right)
-			return
-		}
-
-		var mis motionItems
-		if ev.Modifiers.Contain(key.ModShift) {
-			mis = newSelectionMotionItems(e, Right)
-		} else {
-			mis = newCursorsMotionItems(e)
-		}
-
-		if ev.Modifiers.Contain(key.ModAlt) && !e.SelectionsPresent() && len(e.CursorIndices) > 0 {
-			e.AddNewCursorBelowLast()
-			break
-		}
-
-		w := runes.NewWalker(e.Bytes())
-		for _, mi := range mis.items() {
-			w.SetRunePosCache(mi.position(), &e.runeOffsetCache)
-			li := w.IndexInLine()
-			w.ForwardToEndOfLine()
-			w.Forward(1)
-			if li >= w.LineLen() {
-				li = w.LineLen() - 1
-			}
-			w.Forward(li)
-			mi.setPosition(w.RunePos())
-		}
-		mis.doneAdjusting(gtx)
-	case "⇲":
-		// End
-		if e.SelectionsPresent() && !ev.Modifiers.Contain(key.ModShift) {
-			e.clearSelections()
-		}
-
-		if ev.Modifiers.Contain(key.ModCtrl) && e.text.Len() > 0 {
-			from := e.firstCursorIndex()
-			e.moveToEndOfDoc(gtx)
-			if ev.Modifiers.Contain(key.ModShift) {
-				e.addSecondarySelection(from, e.firstCursorIndex(), Right)
-			}
-			break
-		}
-
-		var mis motionItems
-		if ev.Modifiers.Contain(key.ModShift) {
-			mis = newSelectionMotionItems(e, Right)
-		} else {
-			mis = newCursorsMotionItems(e)
-		}
-
-		w := runes.NewWalker(e.Bytes())
-		for _, mi := range mis.items() {
-			w.SetRunePosCache(mi.position(), &e.runeOffsetCache)
-			w.ForwardToEndOfLine()
-			mi.setPosition(w.RunePos())
-		}
-		mis.doneAdjusting(gtx)
-	case "⇱":
-		// Home
-		if e.SelectionsPresent() && !ev.Modifiers.Contain(key.ModShift) {
-			e.clearSelections()
-		}
-
-		if ev.Modifiers.Contain(key.ModCtrl) {
-			from := e.firstCursorIndex()
-			e.setToOneCursorIndex(0)
-			e.makeCursorVisibleByScrolling(gtx)
-			if ev.Modifiers.Contain(key.ModShift) {
-				e.addSecondarySelection(e.firstCursorIndex(), from, Left)
-			}
-			break
-		}
-
-		var mis motionItems
-		if ev.Modifiers.Contain(key.ModShift) {
-			mis = newSelectionMotionItems(e, Left)
-		} else {
-			mis = newCursorsMotionItems(e)
-		}
-
-		w := runes.NewWalker(e.Bytes())
-		for _, mi := range mis.items() {
-			w.SetRunePosCache(mi.position(), &e.runeOffsetCache)
-			w.BackwardToStartOfLine()
-			mi.setPosition(w.RunePos())
-		}
-		mis.doneAdjusting(gtx)
-	case "⇟":
-		// Page down
-		e.ScrollOnePage(gtx, Down)
-	case "⇞":
-		// Page up
-		e.ScrollOnePage(gtx, Up)
-	case "Z":
-		if ev.Modifiers.Contain(key.ModCtrl) || ev.Modifiers.Contain(key.ModCommand) {
-			if e.matchingBracketInsertion.Undo(gtx, e) {
-				break
-			}
-			e.Undo(gtx)
-		}
-	case "R":
-		if ev.Modifiers.Contain(key.ModCtrl) || ev.Modifiers.Contain(key.ModCommand) {
-			e.Redo(gtx)
-			clearRecentlyTypedText = true
-		}
-	case "E":
-		if ev.Modifiers.Contain(key.ModCtrl) {
-			e.ScrollOneLine(gtx, Up)
-		}
-	case "Y":
-		if ev.Modifiers.Contain(key.ModCtrl) {
-			e.ScrollOneLine(gtx, Down)
-		}
-	case "N":
-		if ev.Modifiers.Contain(key.ModCtrl) && len(e.CursorIndices) == 1 {
+	updateFlags := func(r keyHandlerResult) {
+		if r.resetWordCompletions.IsSet() && !r.resetWordCompletions.MustVal() {
 			resetWordCompletions = false
-			ndx := e.firstCursorIndex()
-			ctx := e.wordObjectToComplete(ndx)
-			e.doWordCompletion(ctx, Forward)
-			clearRecentlyTypedText = true
 		}
-	case "P":
-		if ev.Modifiers.Contain(key.ModCtrl) && len(e.CursorIndices) == 1 {
-			if e.wordCompletion.isCompletionInProgress() {
-				resetWordCompletions = false
-				ndx := e.firstCursorIndex()
-				ctx := e.wordObjectToComplete(ndx)
-				e.doWordCompletion(ctx, Reverse)
-			}
-
-			if e.fileCompletion.isCompletionInProgress() {
-				resetFileCompletions = false
-				ndx := e.firstCursorIndex()
-				ctx := e.filenameObjectToComplete(ndx)
-				e.doFilenameCompletion(ctx, Reverse)
-			}
-			clearRecentlyTypedText = true
-		}
-	case "F":
-		if ev.Modifiers.Contain(key.ModCtrl) {
+		if r.resetFileCompletions.IsSet() && !r.resetFileCompletions.MustVal() {
 			resetFileCompletions = false
-			ndx := e.firstCursorIndex()
-			ctx := e.filenameObjectToComplete(ndx)
-			e.doFilenameCompletion(ctx, Forward)
+		}
+		if r.resetCommandCompletions.IsSet() && !r.resetCommandCompletions.MustVal() {
+			resetCommandCompletions = false
+		}
+		if r.clearRecentlyTypedText.IsSet() && r.clearRecentlyTypedText.MustVal() {
 			clearRecentlyTypedText = true
 		}
-	case "S":
-		if ev.Modifiers.Contain(key.ModCtrl) || ev.Modifiers.Contain(key.ModCommand) {
-			e.adapter.put()
-		}
-	case "G":
-		if ev.Modifiers.Contain(key.ModCtrl) {
-			e.adapter.get()
-		}
-	case "Q":
-		if ev.Modifiers.Contain(key.ModCtrl) {
-			ndx := e.firstCursorIndex()
-			if e.primarySel != nil && ndx == e.primarySel.End() {
-				// As a special case, if the cursor is just after the end of the primary
-				// selection likely the user wants to execute the primary selection. They
-				// might have just typed some text, hit Escape to select it, and are using
-				// Enter to execute it.
-				ndx--
-			}
-
-			howToLoad := loadFileInSeparateWindow
-			if ev.Modifiers.Contain(key.ModAlt) {
-				howToLoad = loadFileInCurrentWindow
-			}
-			e.acquire(gtx, ndx, howToLoad)
-
-			return
-		}
-	case "C":
-		if ev.Modifiers.Contain(key.ModCtrl) || ev.Modifiers.Contain(key.ModCommand) {
-			e.adapter.copyAllSelectionsFromLastSelectedEditable(gtx)
-		}
-	case "X":
-		if ev.Modifiers.Contain(key.ModCtrl) || ev.Modifiers.Contain(key.ModCommand) {
-			e.adapter.cutAllSelectionsFromLastSelectedEditable(gtx)
-			clearRecentlyTypedText = true
-		}
-	case "V":
-		if ev.Modifiers.Contain(key.ModCtrl) || ev.Modifiers.Contain(key.ModCommand) {
-			e.adapter.pasteToFocusedEditable(gtx)
-			clearRecentlyTypedText = true
-		}
-	case "L":
-		if ev.Modifiers.Contain(key.ModCtrl) {
-			e.InsertLozenge()
-		}
-	case "T":
-		if ev.Modifiers.Contain(key.ModCtrl) {
-			ndx := e.firstCursorIndex()
-			if e.primarySel != nil && ndx == e.primarySel.End() {
-				// As a special case, if the cursor is just after the end of the primary
-				// selection likely the user wants to execute the primary selection. They
-				// might have just typed some text, hit Escape to select it, and are using
-				// Enter to execute it.
-				ndx--
-			}
-			t := e.textObjectForExecutionAt(ndx)
-			if t != "" {
-				if ev.Modifiers.Contain(key.ModAlt) {
-					e.adapter.clearErrors()
-				}
-				e.adapter.execute(e, gtx, t, nil)
-			}
-			clearRecentlyTypedText = true
-		}
-	case "/", "?":
-		if ev.Modifiers.Contain(key.ModCtrl) {
-			ndx := e.firstCursorIndex()
-			if e.primarySel != nil && ndx == e.primarySel.End() {
-				// As a special case, if the cursor is just after the end of the primary
-				// selection likely the user wants to execute the primary selection. They
-				// might have just typed some text, hit Escape to select it, and are using
-				// Enter to execute it.
-				ndx--
-			}
-
-			// GIO behaves differently here between Linux and Windows for the keystroke we want to use to search backwards.
-			// In Linux we get CTRL-?. In Windows we get CTRL-SHIFT-/.
-			dir := Forward
-			if ev.Name == "?" || ev.Modifiers.Contain(key.ModShift) {
-				dir = Reverse
-			}
-
-			if e.lastKeypressWasSearch {
-				e.ContinueSearch(gtx, dir)
-			} else {
-				t := e.textObjectForSearchAt(ndx)
-				if t != "" {
-
-					// The behavour here is subtle. Imagine the user entered a regex in the tag to search for, and hit CTRL-/ multiple times.
-					// We want it to behave like the right clicked multiple times: find the first match of the regex and select it, then
-					// find the next match and select that as well, and so on. We also want the keyboard focus to shift to the Body so once
-					// they have selected the items they want they can manipulate them with the keyboard.
-					//
-					// So the first time the user hits CTRL-/ in the Tag, and we start a new search, select the match, set the keyboard
-					// focus to the body, and record in the body the search term and flag that a search is in progress. The next time CTRL-/
-					// is pressed, the event is processed by the body, which realizes a search is in progress and continues the search by
-					// finding the next match. The body handles the remaining keypresses in this way.
-					//
-					// In the Shift keypress handler below, we don't clear the flag that the last keypress was a search. This is so
-					// the user can search forwards with CTRL-/ and then backwards for the same term with CTRL-SHIFT-/ (aka ?): pressing
-					// the shift key alone must _not_ reset the search.
-					e.SearchAndUpdateEditable(gtx, t, e.executeOn.firstCursorIndex(), dir)
-					e.executeOn.lastSearchTerm = t
-				}
-			}
-			e.executeOn.lastKeypressWasSearch = true
+		if r.clearLastKeypressWasSearch.IsSet() && !r.clearLastKeypressWasSearch.MustVal() {
 			clearLastKeypressWasSearch = false
-			clearRecentlyTypedText = true
 		}
-	case "A":
-		if ev.Modifiers.Contain(key.ModCtrl) || ev.Modifiers.Contain(key.ModCommand) {
-			e.selectAll()
-			clearRecentlyTypedText = true
-		}
-	case "D":
-		if ev.Modifiers.Contain(key.ModCtrl) {
-			e.DelimitSelectionsWithCursors()
-		}
-	case "U":
-		if e.SelectionsPresent() {
-			return
-		}
+		state.lastHandlerReportedHandled = r.handled
+	}
 
-		if ev.Modifiers.Contain(key.ModCtrl) {
-			e.text.StartTransaction()
-			for i, ndx := range e.CursorIndices {
-				w := runes.NewWalker(e.Bytes())
-				w.SetRunePosCache(ndx, &e.runeOffsetCache)
-				start, end := w.CurrentLineBounds()
-				if start != end {
-					e.CursorIndices[i] = start
-					e.deleteFromPieceTableUndoIndex(start, end-start, ndx)
-				}
-			}
-			e.text.EndTransaction()
-			clearRecentlyTypedText = true
-		}
-	case "K":
-		if e.SelectionsPresent() {
-			return
-		}
-
-		if ev.Modifiers.Contain(key.ModCtrl) {
-			e.text.StartTransaction()
-			for _, ndx := range e.CursorIndices {
-				w := runes.NewWalker(e.Bytes())
-				w.SetRunePosCache(ndx, &e.runeOffsetCache)
-				w.ForwardToEndOfLine()
-				p := w.RunePos()
-				//start, end := w.CurrentLineBounds()
-				if ndx != p {
-					e.deleteFromPieceTableUndoIndex(ndx, p-ndx, ndx)
-				}
-			}
-			e.text.EndTransaction()
-			clearRecentlyTypedText = true
-		}
-	case "Ctrl":
-		// Ctrl
-		resetWordCompletions = false
-		resetFileCompletions = false
-		if e.pointerState.pressedButtons.Contain(pointer.ButtonPrimary) {
-			e.adapter.cutAllSelectionsFromLastSelectedEditable(gtx)
+	for actions.Next() {
+		action := actions.Item().(boundKeyAction)
+		log(LogCatgEd, "Performing action %s\n", action.keyAction.name)
+		r := action.handler(gtx, e, ev, action.params, state)
+		updateFlags(r)
+		if r.stopProcessingActions {
 			break
 		}
-
-		/* This code is written this way to handle a specific corner case. Imagine this sequence:
-		   1. The user selects text in window 1. The keyboard focus is changed to window 1.
-			 2. The user middle-clicks a word or selection in window 2. The keyboard focus remains in window 1.
-			 3. The user clicks Ctrl. The keypress is handled by window 1.
-			 Thus, when handling the Ctrl keypress in window 1, we need to find out which window
-			 the middle-click occurred in (window 2), and also the information about that past middle-click
-			 (i.e. the location) and execute the word or selection in window 2 where that middle-click
-			 occurred.
-		*/
-		if ed := e.adapter.getEditableWhereTertiaryButtonHoldStarted(); ed != nil {
-			log(LogCatgEd, "Ctrl was pressed while tertiary mouse button was pressed\n")
-			ed.executeSelectedWithAllSelectionsInLastSelectedEditable(&ed.pointerState)
-			ed.ignoreTertiaryRelease = true
-		}
-
-	case "Shift":
-		// Shift
-		if e.pointerState.pressedButtons.Contain(pointer.ButtonPrimary) {
-			e.adapter.pasteToFocusedEditable(gtx)
-		}
-		clearLastKeypressWasSearch = false
-	case "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12":
-		tgt := e.executeOn
-		markName := fmt.Sprintf("%s@%s", tgt.adapter.displayPath().String(), ev.Name)
-		if e.pointerState.pressedButtons.Contain(pointer.ButtonPrimary) {
-			tgt.adapter.mark(markName, tgt.adapter.displayPath(), tgt.adapter.loadPath(), tgt.firstCursorIndex())
-		} else {
-			tgt.adapter.gotoMark(markName)
-		}
-
-	case "⎋":
-		// Escape
-		if e.SelectionsPresent() {
-			e.makeCursorAtEachLineInSelections()
-		} else if len(e.CursorIndices) > 1 {
-			e.reduceCursorsToOne()
-		} else {
-			e.selectRecentlyTypedText()
-		}
-
-	default:
-		log(LogCatgEd, "Key %s pressed\n", ev.Name)
 	}
 
 	if resetWordCompletions {
@@ -728,6 +244,9 @@ func (e *editable) KeyPress(gtx layout.Context, ev *key.Event) {
 	if resetFileCompletions {
 		e.fileCompletion.Reset()
 	}
+	if resetCommandCompletions {
+		e.commandCompletion.Reset()
+	}
 	if clearRecentlyTypedText {
 		e.ClearRecentlyTypedText()
 	}
@@ -735,6 +254,17 @@ func (e *editable) KeyPress(gtx layout.Context, ev *key.Event) {
 		e.lastKeypressWasSearch = false
 		e.executeOn.lastKeypressWasSearch = false
 	}
+}
+
+func (e *editable) logKeyPress(ev *key.Event) {
+	var m string
+	if ev.Modifiers == 0 {
+		m = "no modifiers"
+	} else {
+		m = fmt.Sprintf("modifiers %s", ev.Modifiers.String())
+	}
+	log(LogCatgEd, "Key '%s' pressed with %s\n", ev.Name, m)
+
 }
 
 // AddNewCursorBelowLast adds a new cursor in the line below the last cursor in the
@@ -1076,6 +606,7 @@ func (e *editable) Pointer(gtx layout.Context, ev *pointer.Event) {
 	log(LogCatgEd, "%s: pointer event: %s\n", e.label, e.pointerEventString(ev))
 	e.wordCompletion.Reset()
 	e.fileCompletion.Reset()
+	e.commandCompletion.Reset()
 	e.invalidateLayedoutText()
 	e.InitPointerEventHandlers()
 	e.pointerState.Event(ev, gtx)
@@ -1129,9 +660,22 @@ func (e *editable) ScrollOneLine(gtx layout.Context, d verticalDirection) {
 	if posBefore == posAfter {
 		return
 	}
+	// Prevent scrolling outside body
+	if posAfter >= e.Len() {
+		return
+	}
 
 	e.TopLeftIndex = w.RunePos()
 	e.invalidateLayedoutText()
+}
+
+func (e *editable) ScrollOneLayer(d verticalDirection) {
+	if d == Down {
+		editor.ActivateLayerRelativeToCurrent(-1)
+	} else {
+		editor.ActivateLayerRelativeToCurrent(+1)
+	}
+	editor.SignalRedrawRequired()
 }
 
 func (e *editable) ScrollOnePage(gtx layout.Context, d verticalDirection) {
@@ -1205,6 +749,14 @@ func (e *editable) layoutPreviousPageBackwardsFrom(gtx layout.Context, runeIndex
 }
 
 func (e *editable) relayout(gtx layout.Context) {
+	defer func(start time.Time) {
+		end := time.Now()
+		d := end.Sub(start)
+		if d > 1*time.Second {
+			log(LogCatgEd,"editable.relayout: took %s seconds to layout %s\n", d, e.label)
+		}
+	}(time.Now())
+
 	e.initPreDrawState(gtx)
 
 	if e.preDrawHook != nil {
@@ -1265,17 +817,45 @@ func (e *editable) postDraw(gtx layout.Context) {
 	e.pointerState.FreeLayoutContext()
 }
 
+type visibleTextCache struct {
+	visibleText []byte
+	topLeftIndex int
+	heightInLines int
+}
+
+func (v *visibleTextCache) Clear() {
+	v.visibleText = nil
+}
+
+func (v *visibleTextCache) Valid(topLeftIndex, heightInLines int) bool {
+	return v.visibleText != nil && v.topLeftIndex == topLeftIndex && v.heightInLines == heightInLines
+}
+
+func (v *visibleTextCache) Set(topLeftIndex, heightInLines int, visibleText []byte) {
+	v.topLeftIndex = topLeftIndex
+	v.heightInLines = heightInLines
+	v.visibleText = visibleText
+}
+
 func (e *editable) visibleText(gtx layout.Context) []byte {
+	tl := e.TopLeftIndex
+	h := e.heightInLines(gtx)
+
+	if e.visibleTextCache.Valid(tl, h) {
+		return e.visibleTextCache.visibleText
+	}
+
 	doc := e.Bytes()
 
 	doc, _ = e.removeFirstNRunes(doc, e.TopLeftIndex)
 
-	h := e.heightInLines(gtx)
 	w := runes.NewWalker(doc)
 	w.ForwardLines(h + 1)
 	p := w.BytePos()
 
 	doc = doc[:p]
+
+	e.visibleTextCache.Set(tl, h, doc)
 	return doc
 }
 
@@ -1329,6 +909,7 @@ func (e *editable) textLayoutConstraints(gtx layout.Context) typeset.Constraints
 
 func (e *editable) invalidateLayedoutText() {
 	e.layedoutText = nil
+	e.visibleTextCache.Clear()
 }
 
 type fireListenersBehaviour int
@@ -1614,7 +1195,7 @@ func (e *editable) onPointerTertiaryButtonRelease(ps *PointerState) {
 
 func (e *editable) executeSelected(ps *PointerState, args ...string) {
 	runeIndex := ps.currentPointerEvent.runeIndex
-	cmd := e.textObjectForExecutionAt(runeIndex)
+	cmd, _ := e.textObjectForExecutionAt(runeIndex)
 
 	e.adapter.execute(e, ps.gtx, cmd, args)
 	e.lastSearchResult = nil
@@ -1641,6 +1222,10 @@ func (e *editable) onPointerSecondaryButtonPress(ps *PointerState) {
 
 	determineAction := func() (action int) {
 
+		if ps.currentPointerEvent.runeIndex == e.Len() {
+			return noop
+		}
+
 		action = acquire
 		if pointerEventsOccurredAtAlmostSamePlace(&ps.currentPointerEvent, &ps.lastPointerEvent) &&
 			ps.lastPressEvent.set &&
@@ -1648,7 +1233,7 @@ func (e *editable) onPointerSecondaryButtonPress(ps *PointerState) {
 			ps.lastPressEvent.button == pointer.ButtonSecondary {
 
 			action = continuePreviousSearch
-			obj = e.textObjectForAcquireAt(ps.lastPressEvent.runeIndex)
+			obj, _ = e.textObjectForAcquireAt(ps.lastPressEvent.runeIndex)
 		}
 
 		if action == acquire {
@@ -1663,7 +1248,7 @@ func (e *editable) onPointerSecondaryButtonPress(ps *PointerState) {
 			}
 
 			action = newSearch
-			obj = e.textObjectForSearchAt(ps.currentPointerEvent.runeIndex)
+			obj, _ = e.textObjectForSearchAt(ps.currentPointerEvent.runeIndex)
 		}
 
 		return
@@ -1695,7 +1280,7 @@ func (e *editable) onPointerSecondaryButtonPress(ps *PointerState) {
 }
 
 func (e *editable) acquire(gtx layout.Context, runeIndex int, howToLoad fileLoadArrangement) {
-	obj := e.textObjectForAcquireAt(runeIndex)
+	obj, trange := e.textObjectForAcquireAt(runeIndex)
 
 	if e.plumb(gtx, obj) {
 		return
@@ -1710,17 +1295,26 @@ func (e *editable) acquire(gtx layout.Context, runeIndex int, howToLoad fileLoad
 		return
 	}
 
-	e.determineFilePathAndLoadFile(obj, seek, howToLoad)
+	// Specifically if we are acquiring part of the path of the window then behave specially
+	omit := e.shouldOmitWinPathWhenAcquiring != nil && e.shouldOmitWinPathWhenAcquiring(&trange)
+
+	e.determineFilePathAndLoadFile(obj, seek, howToLoad, omit)
 }
 
-func (e *editable) determineFilePathAndLoadFile(partialFilePath string, seek seek, how fileLoadArrangement) {
+func (e *editable) determineFilePathAndLoadFile(partialFilePath string, seek seek, how fileLoadArrangement, omitWinPath bool) {
 	j := NewNamedJob(filepath.Base(partialFilePath))
 	e.adapter.addJob(j)
+	var completer *PathCompleter
+	if omitWinPath {
+		completer = e.adapter.completerOmitWindowPath()
+	} else {
+		completer = e.adapter.completer()
+	}
 	go func() {
 		// The call to Complete can block if the file is remote and there is already an ssh connection pending for it.
 		// If there is, we would block on the ssh cache mutex, which would freeze the UI.
 		// Hence we are doing the call to Complete in a new goroutine
-		displayPath, loadPath := completeDisplayAndLoadPaths(e.adapter.completer(), partialFilePath)
+		displayPath, loadPath := completeDisplayAndLoadPaths(completer, partialFilePath)
 
 		w := determineFilePathAndLoadFileWork{
 			job:                 j,
@@ -1946,9 +1540,9 @@ func (e *editable) onPointerTertiaryButtonDrag(ps *PointerState) {
 }
 
 func (e *editable) scrollIfPointerEventNearEdge(ps *PointerState) {
-	if ps.currentPointerEvent.Position.Y < float32(e.lineHeight()) {
+	if ps.currentPointerEvent.Position.Y < 0 {
 		e.ScrollOneLine(ps.gtx, Up)
-	} else if ps.currentPointerEvent.Position.Y > float32((e.heightInLines(ps.gtx)-1)*e.lineHeight()) {
+	} else if ps.currentPointerEvent.Position.Y > float32((e.heightInLines(ps.gtx))*e.lineHeight()) {
 		e.ScrollOneLine(ps.gtx, Down)
 	}
 }
@@ -1972,8 +1566,8 @@ func (e *editable) onPointerScroll(ps *PointerState) {
 		direction = Up
 	}
 
-	if ps.currentPointerEvent.Modifiers&key.ModCtrl > 0 {
-		e.adjustFontSizeOnScroll(direction)
+	if ps.currentPointerEvent.Modifiers.Contain(key.ModCtrl) {
+		e.ScrollOneLayer(direction)
 		return
 	}
 
@@ -1982,23 +1576,8 @@ func (e *editable) onPointerScroll(ps *PointerState) {
 	}
 }
 
-func (e *editable) adjustFontSizeOnScroll(direction verticalDirection) {
-	style := e.adapter.style()
-	for i := range style.Fonts {
-		d := 1
-		if direction == Down {
-			d = -1
-		}
-		style.Fonts[i].FontSize += unit.Sp(d)
-		if style.Fonts[i].FontSize < 1 {
-			style.Fonts[i].FontSize = 1
-		}
-	}
-	e.adapter.setStyle(style)
-
-}
-
 func (e *editable) prepareStylesChanges(gtx layout.Context) {
+	// TODO: We only need to add the visible ones here.
 	e.styleSeq.Reset()
 	e.initStyleChangesFromSelections(gtx)
 	e.initStyleChangesFromSyntax(gtx)
@@ -2363,73 +1942,127 @@ func (e *editable) applyStyleFor(c []intvl.Interval) {
 }
 
 func (e *editable) drawCursor(gtx layout.Context) {
-	var path clip.Path
+	lhInDp := float32(gtx.Metric.PxToDp(e.lineHeight()))
+	consts := map[draw.Const]float32{
+		draw.ConstLineHeight:    lhInDp,
+		draw.ConstNegLineHeight: -lhInDp,
+	}
+	draw.Run(gtx, e.style.compiledCursorProg, consts)
+}
 
-	lh := float32(e.lineHeight())
+type keyHandlingCoordination struct {
+	keyEventHandlerCalledSinceEditEventHandlerCalled bool
+	keyEventHandlerProcessedLastKeyEvent             bool
+}
 
-	pt := func(x, y int) f32.Point {
-		xi := gtx.Metric.Dp(unit.Dp(x))
-		yi := gtx.Metric.Dp(unit.Dp(y))
-		return f32.Pt(float32(xi), float32(yi))
+func (kc keyHandlingCoordination) String() string {
+	return fmt.Sprintf("keyEventHandlerCalledSinceEditEventHandlerCalled: %v keyEventHandlerProcessedLastKeyEvent: %v",
+		kc.keyEventHandlerCalledSinceEditEventHandlerCalled, kc.keyEventHandlerProcessedLastKeyEvent)
+}
+
+func (e *editable) InsertTextAndHandleKeys(gtx layout.Context, text string) {
+	// If the current keymap has a handler for any of the keys in this text then
+	// we will receive (or have received) a separate key.Event event for it and
+	// so we should not insert the text for this key.
+	//
+	// So we will receive a key.Event and a key.EditEvent for the same key.
+	// If there is a handler we want it to handle the key, otherwise we
+	// want to insert the text. Also I am not sure that the order of which
+	// is processed first is constant; I assume we will always receive a key
+	// event and an edit event, but the order in which we receive that pair
+	// might vary for each keypress. Whats more, we might receive several
+	// key events before the corresponding edit event; some keys do not generate
+	// text that gets typed (Ctrl, Shift, F1, etc)
+	//
+	// As well, the editable receiving the EditEvent might not be the same as the
+	// one receiving the Keypress event since the handler could switch focus to
+	// another window/editable.
+	//
+	// To handle it, we use two bits of data that we store glboally. First, a boolean
+	// that indicates if either of the key.Event or key.EditEvent have been seen.
+	// When the first one is observed the boolean is set to true, and when the
+	// one occuring later is handled, the boolean is set to false. This lets
+	// this function tell if a handler has already been called or not.
+	//
+	// The second data stored is a boolean that indicates whether last key event
+	// was processed by the function processing the key.Event, or if it was ignored
+	// because there was no handler and no default action. The function will set it
+	// to true if there was a handler for it, and will set it to false if it was not
+	// handled.
+	//
+	// Then this function can decide what action to take:
+	//
+	// 1. If this function is processing the key 	before the key handler, then
+	//     if there is a handler set for this key then we ignore the event because
+	//     the handler will later process it. Otherwise we insert
+	//     the text.
+	//
+	// 2. If this function is processing the key after the key handler, then check
+	//     if the last event processed is set. If it is not set, then there was
+	//     no handler for the key so we can insert it. If it is set then there was
+	//     a handler for it and we should ignore it.
+	//
+	// Note that a key handler might have processed the keypress before this
+	// function and then changed keymaps so it appears there is no handler for
+	// the key. So it is not sufficient to rely on checking for the presence of a
+	// registered handler alone without also recording information about the
+	// last handled keypress.
+	//
+	// The asumption that we will always get one EditEvent for each keypress
+	// event needs to be validated. What if GIO sends each keypress event but
+	// buffers multiple keypresses together into one EditEvent? I think in this
+	// case we might need to perform this algorithm for each key separately;
+	// have two booleans for each key to indicate if it was handled or not, etc.
+
+	for _, r := range text {
+		s := string(r)
+
+		if !editor.keyHandlingCoordination.keyEventHandlerCalledSinceEditEventHandlerCalled {
+			// Before keypress handler
+			_, ok := e.keys.Get(s, 0)
+			if !ok {
+				e.InsertText(s)
+			}
+		} else {
+			// After keypress handler
+			if !editor.keyHandlingCoordination.keyEventHandlerProcessedLastKeyEvent {
+				e.InsertText(s)
+			}
+		}
 	}
 
-	// Outer path
-	path.Begin(gtx.Ops)
-	path.Move(pt(-3, 0))
+	editor.keyHandlingCoordination.keyEventHandlerCalledSinceEditEventHandlerCalled = false
 
-	path.Line(pt(7, 0))
-	path.Line(pt(0, 3))
-	path.Line(pt(-2, 0))
-	// Move down line height less 6
-	path.Line(f32.Pt(0, lh))
-	path.Line(pt(0, -6))
-	path.Line(pt(2, 0))
-	path.Line(pt(0, 3))
-	path.Line(pt(-7, 0))
-	path.Line(pt(0, -3))
-	path.Line(pt(2, 0))
-	// Move up line height less 6
-	path.Line(f32.Pt(0, -lh))
-	path.Line(pt(0, 6))
-	path.Line(pt(-2, 0))
-	path.Line(pt(0, -3))
-	path.Close()
+	// In case the asumptions above don't hold, below is some code that can be used
+	// as a reference in developing a new method.
 
-	stack := clip.Outline{Path: path.End()}.Op().Push(gtx.Ops)
-
-	paint.ColorOp{Color: color.NRGBA{A: 0xff}}.Add(gtx.Ops)
-	paint.PaintOp{}.Add(gtx.Ops)
-
-	stack.Pop()
-
-	// Inner path
-	path.Begin(gtx.Ops)
-	path.Move(pt(-2, 1))
-
-	path.Line(pt(5, 0))
-	path.Line(pt(0, 1))
-	path.Line(pt(-2, 0))
-	path.Line(f32.Pt(0, lh))
-	path.Line(pt(0, -4))
-	path.Line(pt(2, 0))
-	path.Line(pt(0, 1))
-
-	path.Line(pt(-5, 0))
-	path.Line(pt(0, -1))
-	path.Line(pt(2, 0))
-	path.Line(f32.Pt(0, -lh))
-	path.Line(pt(0, 4))
-	path.Line(pt(-2, 0))
-	path.Line(pt(0, 1))
-
-	path.Close()
-
-	stack = clip.Outline{Path: path.End()}.Op().Push(gtx.Ops)
-
-	paint.ColorOp{Color: color.NRGBA{R: 0xf0, G: 0xf0, B: 0xf0, A: 0xff}}.Add(gtx.Ops)
-	paint.PaintOp{}.Add(gtx.Ops)
-
-	stack.Pop()
+	//	if e.keys.Top().TextKeysBehaviour == keymap.OverrideNoTextKeys {
+	//		e.InsertText(text)
+	//		return
+	//	}
+	//
+	//	var buf bytes.Buffer
+	//	insertTextInBuf := func() {
+	//		if buf.Len() > 0 {
+	//			e.InsertText(buf.String())
+	//			buf.Reset()
+	//		}
+	//	}
+	//
+	//	for _, r := range text {
+	//		s := string(r)
+	//		//actions, ok := e.keys.Get(s, 0)
+	//		_, ok := e.keys.Get(s, 0)
+	//		if ok {
+	//			insertTextInBuf()
+	//			ev := key.Event{Name: key.Name(s), State: key.Press}
+	//			e.executeKeypressActions(gtx, &ev, actions)
+	//		} else if e.keys.Top().TextKeysBehaviour == keymap.OverrideSomeTextKeys {
+	//			buf.WriteRune(r)
+	//		}
+	//	}
+	//	insertTextInBuf()
+	//
 }
 
 func (e *editable) InsertText(text string) {
@@ -2838,7 +2471,11 @@ func (e *editable) doFilenameCompletion(ctx completionContext, direction directi
 		ctx := e.filenameObjectToComplete(ndx)
 		e.applyFilenameCompletions(completions, ctx, direction)
 	}
-	e.adapter.completeFilename(ctx.prefix, cb)
+	if e.fileCompletion.NeedCompletions() {
+		e.adapter.completeFilename(ctx.prefix, cb)
+	} else {
+		e.fileCompletion.ApplyCompletion(ctx, direction)
+	}
 }
 
 func (e *editable) applyFilenameCompletions(comps []string, ctx completionContext, direction direction) {
@@ -2851,11 +2488,42 @@ func (e *editable) applyFilenameCompletions(comps []string, ctx completionContex
 		moveCurrentWordToEndOfCompletions(comps)
 		e.fileCompletion.SetCompletions(e.convertStringsToWorders(comps))
 	}
+	e.fileCompletion.dir = e.adapter.dir()
 	e.fileCompletion.ApplyCompletion(ctx, direction)
 }
 
+func (e *editable) doCommandCompletion(ctx completionContext, direction direction) {
+	cb := func(completions []string) {
+		ndx := e.firstCursorIndex()
+		ctx := e.filenameObjectToComplete(ndx) // TODO: should we do something else here instead of filenameObjectToComplete?
+		e.applyCommandCompletions(completions, ctx, direction)
+	}
+	if e.commandCompletion.NeedCompletions() {
+		e.adapter.completeCommand(ctx.prefix, cb)
+	} else {
+		e.commandCompletion.ApplyCompletion(ctx, direction)
+	}
+}
+
+func (e *editable) applyCommandCompletions(comps []string, ctx completionContext, direction direction) {
+
+	moveCurrentWordToEndOfCompletions := func(comps []string) {
+		slice.FindAndMoveToEnd(comps, func(i int) bool { return comps[i] == ctx.word })
+	}
+
+	if e.commandCompletion.NeedCompletions() {
+		moveCurrentWordToEndOfCompletions(comps)
+		e.commandCompletion.SetCompletions(e.convertStringsToWorders(comps))
+	}
+	e.commandCompletion.dir = e.adapter.dir()
+	e.commandCompletion.ApplyCompletion(ctx, direction)
+}
+
 func (e *editable) makeExprHandler() *ExprHandler {
-	file := e.adapter.displayPath().String()
+	file := ""
+	if e.adapter.displayPath() != nil {
+		e.adapter.displayPath().String()
+	}
 	dir := e.adapter.dir()
 
 	data := e.text.Bytes()

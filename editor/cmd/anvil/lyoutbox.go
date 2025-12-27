@@ -144,7 +144,7 @@ func (l *layoutBox) onPointerRelease(ps *PointerState) {
 			} else {
 
 				// This is a layout box of a column. Move the column
-				l.col.ed.moveColBy(l.col, ps.currentPointerEvent.Position.Sub(l.pressPos))
+				l.col.layer.moveColBy(l.col, ps.currentPointerEvent.Position.Sub(l.pressPos))
 			}
 		}
 		l.dragging = false

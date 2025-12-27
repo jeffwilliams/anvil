@@ -113,7 +113,7 @@ func (t *blockEditable) handleEvent(gtx layout.Context, ev event.Event) {
 	case key.Event:
 		t.Key(gtx, &e)
 	case key.EditEvent:
-		t.InsertText(e.Text)
+		t.InsertTextAndHandleKeys(gtx, e.Text)
 	case key.FocusEvent:
 		/*action := "set to"
 		  if !e.Focus {

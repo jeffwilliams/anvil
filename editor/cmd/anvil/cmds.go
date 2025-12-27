@@ -5,21 +5,25 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/image/colornames"
-
 	"gioui.org/layout"
+	"gioui.org/unit"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/jeffwilliams/anvil/editor/internal/escape"
+	"github.com/jeffwilliams/anvil/editor/internal/keymap"
+	"github.com/jeffwilliams/flamegraph"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/image/colornames"
 )
 
 var cmdHistory = NewCommandHistory(100)
@@ -27,7 +31,6 @@ var cmdHistory = NewCommandHistory(100)
 type CommandExecutor struct {
 	// source is a Window, Col or Editor.
 	source interface{}
-	//commands map[string]command
 	commandSet
 	debugCommandSet commandSet
 }
@@ -80,6 +83,7 @@ func NewCommandExecutor(source interface{}) *CommandExecutor {
 func (c *CommandExecutor) initCommands() {
 	c.initDebugCommands()
 	c.initToplevelCommands()
+	c.addCommandlistToHelp()
 }
 
 func (c *CommandExecutor) initToplevelCommands() {
@@ -92,7 +96,10 @@ func (c *CommandExecutor) initToplevelCommands() {
 	addCommand("Del!", c.CmdDelForce, "Delete Window without prompt", "Del! closes the current window. If there are unsaved changes, the user is not prompted to save them.")
 	addCommand("Exit", c.CmdExit, "Exit the editor", "Exit exits the editor.")
 	addCommand("New", c.CmdNew, "Make a new window or open a path", "Usage: New [path]\n\nNew makes a new window or with an argument opens a path. If a window for that file is already opened, a new window for that file is not created. Otherwise, the window is opened in the column with the most free space. If new is executed with an argument the file or directory with the name of the argument is loaded into the window.")
-	addCommand("Acq", c.CmdAcq, "Acquire a path", "Usage: Acq [path]\n\nAcq 'acquires' it's argument. It performs the same function as ALT+Right Click performs on a text object.")
+	addCommand("Acq", c.CmdAcq, "Acquire a path", `Acq 'acquires' its argument. It performs the same function as ALT+Right Click performs on a text object.
+
+Acquire means the following. First, if the word or selection matches a plumbing rule, execute that plumbing rule. If there is no matching plumbing rule, then if the word or selection is a file or directory path and there is already a window open with that path as the filename portion of it's tag, change focus to that window and make it visible. If there is not already a window open for that path, open one. Finally, if a plumbing rule is not executed and the path ends in :N, #C or !X then go to line N, character C or regex X in the file.	
+	`)
 	addCommand("Newcol", c.CmdNewcol, "Create a column", "Newcol creates a new column.")
 	addCommand("Delcol", c.CmdDelcol, "Delete the column", "Delcol deletes the column in which it is executed.")
 	addCommand("Cut", c.CmdCut, "Cut selected text", "Cut deletes the last selected text and it to the clipboard.")
@@ -106,12 +113,18 @@ func (c *CommandExecutor) initToplevelCommands() {
 	addCommand("Keypass", c.CmdKeyPassword, "Specify the password used to decrypt an ssh private key file or log into a host", "Usage: Keypass <keyfile> <password>\n\nKeypass is used to specify the password used to decrypt an ssh private key file. It takes two arguments: the first is the ssh filename and the second is the password. This is needed when an ssh private key file is encrypted and ssh-agent is not being used.")
 	addCommand("Hostpass", c.CmdHostPassword, "Specify the password used to log into an ssh server", "Usage: Hostpass <password> <hostname> [username] [port]\n\nHostpass is used to specify the password used to log into an ssh server. It takes between two and four arguments. The first argument is the password. The second argument is the hostname or IP address of the server. The third argument is the username for the server; if not specified the current user's name is used. The fourth argument is the TCP port number for the server; if not specified 22 is used.")
 	addCommand("Zerox", c.CmdZerox, "Clone a window", "Zerox opens a second window which is a copy of the current window")
-	addCommand("Title", c.CmdTitle, "Set the editor title", "Usage: Title <title...>\n\nTitle sets the title of the editor to it's combined arguments. The title is usually displayed by the OS window manager in the title bar.")
-	addCommand("Syn", c.CmdSyntax, "Enable or disable syntax highlighting, or list supported formats", "Usage: Syn <language>\nSyn off\nSyn list\n\nSyn is used to control syntax highlighting for the current window. With the argument 'off' it disables syntax highlighting, and with the argument 'list' it lists the valid supported languages. With any other argument it enables syntax highlighting and highlights the body using the language named by the argument. With no argument it attempts to analyze the text to autodetect the language.")
+	addCommand("Title", c.CmdTitle, "Set the editor title", "Usage: Title <title...>\n\nTitle sets the title of the editor to it's joined arguments. The title is usually displayed by the OS window manager in the title bar.")
+	addCommand("Syn", c.CmdSyntax, "Enable or disable syntax highlighting, or list supported formats", `Usage: Syn <language>  
+Syn off  
+Syn list
+
+Syn is used to control syntax highlighting for the current window. With the argument 'off' it disables syntax highlighting, and with the argument 'list' it lists the valid supported languages. With any other argument it enables syntax highlighting and highlights the body using the language named by the argument. With no argument it attempts to analyze the text to autodetect the language.
+`)
 	addCommand("Ansi", c.CmdAnsi, "Enable or disable Ansi colors", "Usage: Ansi [on|off]\n\nAnsi is used to control whether Ansi terminal color escape sequences cause coloring or not. With no argument or the 'on' it enables coloring. With the argument 'off' it disables coloring.")
 	addCommand("Dump", c.CmdDump, "Save the editor's state to disk", fmt.Sprintf("Usage: Dump [filename]\n\nDump saves the editor's state to disk: the size of the open windows and the current value of their tags. With an argument the state is written to the file named by the argument. With no argument state is written to the file %s.dump. The state can be loaded using Load", editorName))
 	addCommand("Load", c.CmdLoad, "Load the editor's state from disk", fmt.Sprintf("Usage: Load [filename]\n\nLoad loads the editor's state from disk as written by the Dump command. With an argument the state is read from the file named by the argument. With no argument state is read from the file %s.dump", editorName))
 	addCommand("Putall", c.CmdPutall, "Save all windows", "Putall executes a Put on all open windows, saving all windows.")
+	addCommand("Getall", c.CmdGetall, "Get all windows", "Getall executes a Get on all open windows, reloading all windows.")
 	addCommand("Recent", c.CmdRecent, "Display recent files", "Recent writes the list of most recently closed files to the Errors window.")
 	addCommand("Mark", c.CmdMark, "Add a bookmark", "Usage: Mark [markname]\n\nMark saves the current cursor position in the window body with the name specified by the argument. If no argument is given it is saved with the name 'def'.")
 	addCommand("Goto", c.CmdGoto, "Jump to a bookmark", "Usage: Goto [markname]\n\nGoto sets the current cursor position in the window body to the named bookmark, created by Mark. If no argument is given it jumps to the bookmark 'def'.")
@@ -124,8 +137,18 @@ func (c *CommandExecutor) initToplevelCommands() {
 	addCommand("◊", c.CmdInsertLozenge, "Insert a ◊ rune, or surround selection with it", "If there are no selections, insert a ◊ rune at the cursor. If there are selections, insert a ◊ before and after each selection.")
 	addCommand("Rot", c.CmdRot, "Rotate selections", "Rot rotates the selections when there are multiple selections. The primary selection moves to the next selection, that one to the next and so on, with the last moving to the primary.")
 	addCommand("Do", c.CmdDo, "Execute command", "Usage: Do <command...>\n\nDo executes it's arguments as a command; i.e. as if the arguments were selceted and executed alone. This is useful to execute commands from one window in the context of another window.")
-	addCommand("About", c.CmdAbout, "About the editor", "Print information about the editor, including where some files are expected to be located")
+	addCommand("About", c.CmdAbout, "About the editor",
+		`Print information about the editor, including where some files are expected to be located such as:
+
+  *  The configuration directory
+  *  The settings file, and if it was loaded on startup
+  *  The style configuration file, and if it was loaded on startup
+  *  The SSH key directory, and a list of cached SSH connections
+  *  The plumbing configuration file
+  *  The API listener port, and a list of active API sessions
+`)
 	addCommand("Font", c.CmdFont, "Change to next font", "Change to the next font defined in the styles")
+	addCommand("Fontsize", c.CmdFontSize, "Change the font size", "Change the font size of the current active font. This command accepts one argument. If the argument is a number, then the font size is set to that value in points. If it is +NUM or -NUM then the current font size is increased or decreased by NUM points respectively")
 	addCommand("On", c.CmdOn, "Run command on remote host", "Usage: On <path> <command...>\n\nRun takes two or more arguments. The first is a host and directory (in the format host:directory) and the remaining arguments are the command and arguments to run.")
 	addCommand("Cmds", c.CmdCmds, "List the recent external commands", "List the most recent external commands executed")
 	addCommand("Cmds*", c.CmdCmdsVerbose, "List the recent external commands verbosely", "List the most recent external commands executed along with the directory they were executed in")
@@ -133,10 +156,12 @@ func (c *CommandExecutor) initToplevelCommands() {
 	addCommand("Undo", c.CmdUndo, "Undo the last change", "Undo the last change")
 	addCommand("Redo", c.CmdRedo, "Redo the last change", "Redo the last change")
 	addCommand("PrintCfg", c.CmdPrintCfg, "Print a sample config file", "Usage: PrintCfg <default settings file name>\n\nPrint a sample config file to +Errors. The argument specifies the type of config file to print:\n  ◊PrintCfg settings.toml◊ generates a settings file\n")
-	addCommand("Only", c.CmdOnly, "Del other windows in this column", "When executed in a window or its tag, close the other windows in this column leaving only this window.")
+	addCommand("Only", c.CmdOnly, "Del other windows in this column", "Only takes effect when executed in a window or its tag. With no argument, close the other windows in this column leaving only this window. With the argument 'above', close windows below this window. With the argument 'below', close windows above this window.")
 	addCommand("Clr", c.CmdClr, "Clear (delete) the contents of the window body", "Clear (delete) the contents of the window body")
-	addCommand("Shstr", c.CmdShstr, "Usage: Shstr [string...]\n\nSet the 'Shell String' for the current window",
-		`When executed with one or more arguments, set the 'Shell String' for the current window: the template string that is used to build the command run on a remote system. It may contain these substitutions within braces:
+	addCommand("Shstr", c.CmdShstr, "Set the 'Shell String' for the current window",
+		`Usage: Shstr [string...]
+
+When executed with one or more arguments, set the 'Shell String' for the current window: the template string that is used to build the command run on a remote system. It may contain these substitutions within braces:
 
   Dir: The window directory
   Cmd: The name of the command to be executed
@@ -150,9 +175,14 @@ When executed with no arguments, set the Shell String for the current window to 
 	addCommand("Dbg", c.CmdDbg, "Internal debugging commands", c.dbgCommandLongHelp())
 	addCommand("Hidecol", c.CmdHideCol, "Hide the column", "Hidecol hides the current column.")
 	addCommand("Showcol", c.CmdShowCol, "Show a column", "Usage: Showcol [column name]\n\nShowcol makes the column with the name that matches the first argument visible. If no argument is passed, the first hidden column is made visible")
-	addCommand("Cols", c.CmdCols, "List columns", "Cols lists all the columns")
-	addCommand("Cols*", c.CmdColsVerbose, "List columns verbosely", "Cols* lists all the columns verbosely (including the files in each column)")
-	addCommand("Tint", c.CmdTint, "Colorize selections", "Usage: Tint list\nTint <color>\nTint\n\nTint is used to color selections of text. When executed with the argument 'list' it shows the pre-defined tint colors. When executed with one argument that is not 'list', it changes the text in all current selections to that color. The argument must be a hex color code in the form #rrggbb or a color name. When executed with no argument and selections present, it removes the coloring for text that overlap the selections. When run with no arguments and no selections it clears all tinting.")
+	addCommand("Cols", c.CmdCols, "List columns", "Cols lists all the columns and layers")
+	addCommand("Cols*", c.CmdColsVerbose, "List columns verbosely", "Cols* lists all the columns and layers verbosely (including the files in each column)")
+	addCommand("Tint", c.CmdTint, "Colorize selections", `Usage: Tint list  
+Tint <color>  
+Tint
+
+Tint is used to color selections of text. When executed with the argument 'list' it shows the pre-defined tint colors. When executed with one argument that is not 'list', it changes the text in all current selections to that color. The argument must be a hex color code in the form #rrggbb or a color name. When executed with no argument and selections present, it removes the coloring for text that overlap the selections. When run with no arguments and no selections it clears all tinting.
+`)
 	addCommand("Fuzz", c.CmdFuzz, "Perform a fuzzy search", `Usage: Fuzz [terms...]
 
 Fuzz performs a fuzzy search through the lines in the window body. The terms for the search are the arguments to the Fuzz command. The lines which match the search are written to a new window for the current directory with the suffix '+Live'.
@@ -164,17 +194,51 @@ The Fuzz command is special in that it can be executed dynamically as you type t
 	addCommand("Sort", c.CmdSort, "Sort the windows in the column", "Sort sorts the windows in the column by their file paths")
 	addCommand("Rel", c.CmdRel, "Make the window paths in the column relative", "If the column has a column path specified, this command makes all of the paths of the windows in the column relative to that column path.")
 	addCommand("Wrap", c.CmdWrap, "Enable or disable line wrapping", "When run with no argument, line wrapping is enabled. When run with the argument 'off', word wrapping is disabled.")
-	addCommand("Alias", c.CmdAlias, "Create a command alias", "Usage: Alias [name] [command...]\n\nAlias creates command aliases. If no arguments are specified it lists the current aliases. If one argument is specified, then that alias is removed. If two arguements are specified, then the first is the name of the alias, and the rest is the aliased command")
-	addCommand("Elastic", c.CmdElastic, "Enable or disable elastic tab stops", "Usage: Elastic\nElastic off\n\nWhen run with no argument, elastic tab stops are enabled for the window body. When run with the argument 'off', elastic tab stops are disabled.")
+	addCommand("Alias", c.CmdAlias, "Create a command alias", `Usage: Alias [name] [command...]
+	
+Alias creates command aliases. If no arguments are specified it lists the current aliases. If one argument is specified, then that alias is removed. If two arguments are specified, then the first is the name of the alias, and the rest is the aliased command.
+
+An alias may contain placeholders of the form $1 to $9 which are replaced with the corresponding arguments to the alias when it is executed. The placeholder $* is replaced with all the arguments separated by a space
+	`)
+	addCommand("Elastic", c.CmdElastic, "Enable or disable elastic tab stops", `Usage: Elastic  
+Elastic off
+
+When run with no argument, elastic tab stops are enabled for the window body. When run with the argument 'off', elastic tab stops are disabled.`)
+	addCommand("Keymap", c.CmdKeymap, "Manipulate keymaps",
+		`Usage: Keymap load <file>  
+Keymap show def <name> | defs | stack  
+Keymap push <name>  
+Keymap pop  
+Keymap win push <name>  
+Keymap win pop  
+Keymap win reset
+
+When run with the 'show' argument, this command shows keymap information. The argument 'defs' shows all defined keymaps. The 'def <name>' shows the definition of the keymap with name <name>. The argument 'stack' shows the current keymap stack, with the top being shown last.
+
+When run with the 'add' argument, load a keymap file which contains one or more keymap definitions. When run with the 'push' argument, push a keymap onto the global keymap stack. When run with the 'pop' argument, pop off the top keymap in the stack. The bottommost keymap is never popped.
+
+If the first argument is win, then the keymap for the local window only is modified. If 'win push' or 'win pop' is executed and the window is using the global keymap stack, then the global keymap stack is copied to the window and a keymap pushed to or popped from that window stack respectively. 'win reset' resets the window's keymap stack to be the global keymap stack again.
+
+`)
+	addCommand("Newlyr", c.CmdNewLayer, "Create a new layer", "Create a new layer and switch to it")
+	addCommand("Dellyr", c.CmdDelLayer, "Delete the current layer", "Delete the current layer")
+	addCommand("Up", c.CmdLayerUp, "Make the layer above this one active", "Make the layer above this one active")
+	addCommand("Down", c.CmdLayerDown, "Make the layer below this one active", "Make the layer below this one active")
+	addCommand("Setlyr", c.CmdSetLayer, "Set which layer index is active", "Set which layer index is active")
+	addCommand("Colup", c.CmdMoveColUp, "Move the current column to the layer above", "Move the current column to the layer above")
+	addCommand("Coldown", c.CmdMoveColDown, "Move the current column to the layer below", "Move the current column to the layer below")
+	addCommand("Colup^", c.CmdMoveColUpAndChangeActiveLayer, "Move the current column to the layer above and make that layer active", "Move the current column to the layer above and make that layer active")
+	addCommand("Coldown^", c.CmdMoveColDownAndChangeActiveLayer, "Move the current column to the layer below and make that layer active", "Move the current column to the layer below and make that layer active")
+	addCommand("Lyrname", c.CmdSetLayerName, "Set the name of the layer", "Set the name of the active  layer to the concatenation of the arguments separated by spaces")
 }
 
 func (c *CommandExecutor) dbgCommandLongHelp() string {
 	var buf bytes.Buffer
 
-	buf.WriteString("Dbg is used to run commands to help debug the internals of Anvil. The available commands are:\n")
+	buf.WriteString("Dbg is used to run commands to help debug the internals of Anvil. The available commands are:\n\n")
 
 	for _, c := range c.debugCommandSet.Commands() {
-		fmt.Fprintf(&buf, "%s  (◊Help %s◊)\n\t%s\n", c.name, "Dbg "+c.name, c.shortHelp)
+		fmt.Fprintf(&buf, "%s  (◊Help %s◊)  \n\t%s  \n", c.name, "Dbg "+c.name, c.shortHelp)
 	}
 	return buf.String()
 }
@@ -188,7 +252,7 @@ func (c *CommandExecutor) initDebugCommands() {
 	addCommand("ProfCpu", c.CmdProfCpu, "Profile CPU usage", "Dbg ProfCpu starts writing profiling information to disk until it is executed a second time at which point it stops profiling.")
 	addCommand("ProfHeap", c.CmdProfHeap, "Profile memory usage", "Dbg ProfHeap is a debug command. It starts writing profiling information to disk until it is executed a second time at which point it stops profiling.")
 	addCommand("Goroutines", c.CmdGoroutines, "Print all goroutines", "Dbg Goroutines is a debug command. It writes all goroutine stacks to the errors window.")
-	addCommand("Logs", c.CmdDbgLogs, "Print internal debug logs", fmt.Sprintf("Dbg Logs displays internal debug logs to the +Errors window. With no arguments it writes logs from all categories. With one or more arguments only those categories are printed. The available categories are:\n  %s",
+	addCommand("Logs", c.CmdDbgLogs, "Print or configure internal debug logs", fmt.Sprintf("Usage: Dbg Logs [category...]\nDbg Logs Stream [stdout|window|off]\nDbg Logs Stream Catg [category...]\n\nDbg Logs [catgory] displays internal debug logs to the +Errors window. With no category it writes logs from all categories. With one or more arguments only those categories are printed. The available categories are:\n  %s\nDbg Logs Stream [stdout|window|off] enables streaming all log categories to standard output, the +Errors window, or disables streaming respectively. Dbg Logs Stream Catg [category...] sets the categories to stream.",
 		strings.Join(debugLogCategories, "\n  ")))
 	addCommand("Pid", c.CmdDbgGetPid, "Print Anvil's PID", "Print the process ID of Anvil")
 	addCommand("Psrv", c.CmdDbgPsrv, "Start the Go pprof debug server",
@@ -203,6 +267,25 @@ If the argument 'off' is passed, the debug server is stopped.
 
 [1] https://pkg.go.dev/net/http/pprof
 	`)
+	addCommand("Paths", c.CmdDbgPaths, "Print window paths", "Print window paths")
+	addCommand("Flame", c.CmdDbgFlame, "Profile CPU and show flame graph", "With the argument 'on' this command starts CPU profiling. When run with the command 'off' it stops CPU profiling and serves an SVG flame graph on a newly created HTTP server. With the command 'kill' it kills the running HTTP server.")
+}
+
+func (c CommandExecutor) addCommandlistToHelp() {
+	var text bytes.Buffer
+	var names []string
+	for k := range c.commands {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+
+	for _, k := range names {
+		v := c.commands[k]
+		fmt.Fprintf(&text, "%s  (◊Help %s◊)\n\t%s\n", k, k, v.shortHelp)
+	}
+	text.WriteRune('\n')
+
+	AddHelp("Commands", text.String())
 }
 
 func (c CommandExecutor) Do(cmd string, ctx *CmdContext) {
@@ -354,56 +437,36 @@ func (c CommandExecutor) CmdNew(ctx *CmdContext) {
 	}
 	path = strings.TrimSpace(path)
 
-	var loadPath *GlobalPath
-	var displayPath *GlobalPath
-	var err error
-	if path != "" {
-		loadPath, displayPath = completeDisplayAndLoadPaths(ctx.Completer, path)
-	} else {
-		loadPath = NewGlobalPath("", GlobalPathUnknown)
-		displayPath = loadPath.Clone()
+	path, seek, err := parseSeekFromFilename(path)
+	if err != nil {
+		editor.AppendError("", fmt.Sprintf("Parsing seek failed: %v", err))
 	}
-
-	var w *Window
-	if path != "" {
-		w = editor.FindWindowForFileAndDisplay(loadPath.String())
-		if w != nil {
-			// TODO: Warp pointer to here
-			w.showIfHidden()
-			w.SetFocus(ctx.Gtx)
-			w.GrowIfBodyTooSmall()
-			return
-		}
-	}
-
-	w = editor.NewWindow(c.column())
-	if w == nil {
-		return
-	}
-	w.markTextAsUnchanged()
-
-	w.SetPathsAndTag(displayPath, loadPath)
 
 	if path == "" {
-		w.SetFocus(ctx.Gtx)
-		return
-	}
-
-	gdirOfError := ctx.Completer.Dir()
-	dirOfError := gdirOfError.String()
-
-	err = w.LoadFile(displayPath, loadPath)
-	if err != nil {
-		e, ok := err.(*fs.PathError)
-		// Don't consider the file not existing as fatal, in case of the New command
-		if ok && !errors.Is(e, fs.ErrNotExist) {
-			w.col.markForRemoval(w)
-			editor.AppendError(dirOfError, err.Error())
+		loadPath := NewGlobalPath("", GlobalPathUnknown)
+		displayPath := loadPath.Clone()
+		w := editor.NewWindow(c.column())
+		if w == nil {
 			return
 		}
+		w.markTextAsUnchanged()
+		w.SetPathsAndTag(displayPath, loadPath)
+		w.SetFocus(ctx.Gtx)
+		return
+
 	}
 
-	w.SetFocus(ctx.Gtx)
+	loadPath, displayPath := completeDisplayAndLoadPaths(ctx.Completer, path)
+
+	var opts LoadFileOpts
+	if !seek.empty() {
+		opts = LoadFileOpts{GoTo: seek, SelectBehaviour: selectText, GrowBodyBehaviour: dontGrowBodyIfTooSmall}
+	}
+	w := editor.LoadFileOpts(displayPath, loadPath, opts)
+	if w != nil {
+		w.SetFocus(ctx.Gtx)
+	}
+
 	editor.notifyFileOpened(w)
 }
 
@@ -437,6 +500,17 @@ func (c CommandExecutor) CmdAcq(ctx *CmdContext) {
 		path = ctx.CombinedArgs()
 	}
 
+	if plumber != nil {
+		plumbed, err := plumber.Plumb(path, &c, ctx)
+		if err != nil {
+			log(LogCatgCmd, "CommandExecutor: Error plumbing: %v\n", err)
+		}
+
+		if plumbed {
+			return
+		}
+	}
+
 	path, seek, err := parseSeekFromFilename(path)
 	if err != nil {
 		editor.AppendError("", fmt.Sprintf("Parsing seek failed: %v", err))
@@ -453,17 +527,6 @@ func (c CommandExecutor) CmdAcq(ctx *CmdContext) {
 		w.SetPathsAndTag(displayPath, loadPath)
 		w.SetFocus(ctx.Gtx)
 		return
-	}
-
-	if plumber != nil {
-		plumbed, err := plumber.Plumb(path, &c, ctx)
-		if err != nil {
-			log(LogCatgCmd, "CommandExecutor: Error plumbing: %v\n", err)
-		}
-
-		if plumbed {
-			return
-		}
 	}
 
 	var opts LoadFileOpts
@@ -736,6 +799,10 @@ func (c CommandExecutor) setExtraEnv(ctx *CmdContext, ex *execCtx) {
 
 	if d, err := os.Getwd(); err == nil {
 		ex.extraEnv = append(ex.extraEnv, fmt.Sprintf("ANVIL_DIR=%s", d))
+	}
+	
+	if activeLayer := editor.activeLayer(); activeLayer != nil {
+		ex.extraEnv = append(ex.extraEnv, fmt.Sprintf("ANVIL_LAYER_NAME=%s", activeLayer.Name))
 	}
 
 	for k, v := range settings.Env {
@@ -1382,6 +1449,10 @@ func (c CommandExecutor) CmdPutall(ctx *CmdContext) {
 	editor.Putall()
 }
 
+func (c CommandExecutor) CmdGetall(ctx *CmdContext) {
+	editor.Getall()
+}
+
 func (c CommandExecutor) CmdRecent(ctx *CmdContext) {
 	s := strings.Join(editor.RecentFiles(), "\n")
 	editor.AppendError("", s)
@@ -1498,22 +1569,7 @@ func (c CommandExecutor) CmdHelp(ctx *CmdContext) {
 		return
 	}
 
-	var text bytes.Buffer
-	fmt.Fprintf(&text, "%s", topLevelHelpString())
-
-	var names []string
-	for k := range c.commands {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-
-	for _, k := range names {
-		v := c.commands[k]
-		fmt.Fprintf(&text, "%s  (◊Help %s◊)\n\t%s\n", k, k, v.shortHelp)
-	}
-	text.WriteRune('\n')
-
-	editor.AppendError("", text.String())
+	editor.AppendError("", topLevelHelpString())
 }
 
 func (c CommandExecutor) CmdRot(ctx *CmdContext) {
@@ -1552,6 +1608,7 @@ func (c CommandExecutor) CmdAbout(ctx *CmdContext) {
 	fmt.Fprintf(&text, "Style config file: %s (%s)\n", StyleConfigFile(), loadedStr(styleLoadedFromFile))
 	fmt.Fprintf(&text, "SSH key directory: %s\n", SshKeyDir())
 	fmt.Fprintf(&text, "Plumbing config file: %s (%s)\n", PlumbingConfigFile(), loadedStr(plumbingLoadedFromFile))
+	fmt.Fprintf(&text, "Keymaps config file: %s (%s)\n", KeymapConfigFile(), loadedStr(keymapsLoadedFromFile))
 	fmt.Fprintf(&text, "API listener port: %d\n", LocalAPIPort())
 
 	sshKeys := sshClientCache.Keys()
@@ -1611,6 +1668,53 @@ func (c CommandExecutor) CmdFont(ctx *CmdContext) {
 	case *Window:
 		v.Body.NextFont()
 	}
+}
+
+func (c CommandExecutor) CmdFontSize(ctx *CmdContext) {
+	if len(ctx.Args) == 0 {
+		return
+	}
+
+	var ad adapter
+	switch v := c.source.(type) {
+	case *Window:
+		ad = v.Body.adapter
+	case *Col:
+		ad = v.Tag.adapter
+	case *Editor:
+		ad = v.Tag.adapter
+	default:
+		return
+	}
+
+	v := ctx.Args[0]
+	v = strings.TrimSpace(v)
+
+	rel := false
+	if strings.HasPrefix(v, "-") || strings.HasPrefix(v, "+") {
+		rel = true
+	}
+	size, err := strconv.Atoi(v)
+	if err != nil {
+		editor.AppendError("", "FontSize expects a numeric argument")
+		return
+	}
+
+	style := ad.style()
+	for i := range style.Fonts {
+		if rel {
+			style.Fonts[i].FontSize += unit.Sp(size)
+		} else {
+			style.Fonts[i].FontSize = unit.Sp(size)
+		}
+
+		if style.Fonts[i].FontSize < 1 {
+			style.Fonts[i].FontSize = 1
+		}
+	}
+	ad.setStyle(style)
+	editor.SignalRedrawRequired()
+
 }
 
 func (c CommandExecutor) CmdOn(ctx *CmdContext) {
@@ -1678,6 +1782,13 @@ func (c CommandExecutor) CmdWins(ctx *CmdContext) {
 }
 
 func (c CommandExecutor) CmdOnly(ctx *CmdContext) {
+
+	const (
+		equal = iota
+		above
+		below
+	)
+
 	switch v := c.source.(type) {
 	case Window:
 	case *Window:
@@ -1685,12 +1796,27 @@ func (c CommandExecutor) CmdOnly(ctx *CmdContext) {
 			return
 		}
 
+		keep := equal
+		if len(ctx.Args) > 0 {
+			switch ctx.Args[0] {
+			case "above":
+				keep = above
+			case "below":
+				keep = below
+			}
+		}
+
+		found := false
 		wins := make([]*Window, 0, len(v.col.Windows))
 		for _, w := range v.col.Windows {
 			if w == v {
+				found = true
 				continue
 			}
-			wins = append(wins, w)
+
+			if (keep == above && found) || (keep == below && !found) || keep == equal {
+				wins = append(wins, w)
+			}
 		}
 
 		c.delWindows(wins...)
@@ -1742,6 +1868,25 @@ func (c CommandExecutor) CmdDbg(ctx *CmdContext) {
 }
 
 func (c CommandExecutor) CmdDbgLogs(ctx *CmdContext) {
+	if len(ctx.Args) >= 2 && ctx.Args[0] == "Stream" {
+		switch ctx.Args[1] {
+			case "stdout":
+				*optDebugStdout = true
+			case "window":
+				*optDebugToWindow = true
+			case "off":
+				*optDebugStdout = false
+				*optDebugToWindow = false
+				categoriesToStream = make(map[string]struct{})
+			case "Catg":
+				categories := ctx.Args[2:]
+				for _, c := range categories {
+					categoriesToStream[c] = struct{}{}
+				}
+		}
+		return
+	}
+
 	msg := debugLog.String(ctx.Args...)
 	editor.AppendError("", msg)
 }
@@ -1758,6 +1903,65 @@ func (c CommandExecutor) CmdDbgPsrv(ctx *CmdContext) {
 		return
 	}
 	startPprofDebugServer()
+}
+
+func (c CommandExecutor) CmdDbgPaths(ctx *CmdContext) {
+	switch v := c.source.(type) {
+	case Window:
+	case *Window:
+		msg := fmt.Sprintf("window display path: '%s' load path: '%s'", v.DisplayPath(), v.LoadPath())
+		editor.AppendError("", msg)
+	}
+}
+
+var (
+	flameGraphBuf *bytes.Buffer
+	flameServer   *http.Server
+)
+
+func (c CommandExecutor) CmdDbgFlame(ctx *CmdContext) {
+	if len(ctx.Args) == 0 {
+		editor.AppendError("", "Dbg Flame expects an argument of 'on' or 'off'")
+		return
+	}
+
+	switch ctx.Args[0] {
+	case "on":
+		flameGraphBuf = new(bytes.Buffer)
+		pprof.StartCPUProfile(flameGraphBuf)
+		editor.AppendError("", "started sampling")
+	case "off":
+		if flameGraphBuf == nil {
+			return
+		}
+		pprof.StopCPUProfile()
+		stacks, err := flamegraph.BuildSamplesFromPProfCPUProfile(flameGraphBuf)
+		if err != nil {
+			msg := fmt.Sprintf("building samples from CPU profile failed: %v", err)
+			editor.AppendError("", msg)
+			return
+		}
+
+		flameGraphBuf.Reset()
+		flamegraph.Render(stacks, flameGraphBuf)
+		var url string
+		url, flameServer, err = serveFlamegraph(flameGraphBuf.Bytes())
+		if err != nil {
+			editor.AppendError("", fmt.Sprintf("serving flame graph failed: %v", err))
+			flameServer = nil
+			return
+		}
+		editor.AppendError("", fmt.Sprintf("Flame graph URL: %s", url))
+	case "kill":
+		if flameServer != nil {
+			flameServer.Close()
+		}
+	default:
+		editor.AppendError("", "Dbg Flame expects an argument of 'on' or 'off'")
+		return
+
+	}
+
 }
 
 func (c CommandExecutor) CmdHideCol(ctx *CmdContext) {
@@ -2078,3 +2282,246 @@ func (c CommandExecutor) CmdElastic(ctx *CmdContext) {
 		editor.SignalRedrawRequired()
 	}
 }
+
+func (c CommandExecutor) CmdKeymap(ctx *CmdContext) {
+	if len(ctx.Args) == 0 {
+		return
+	}
+
+	cmd := ctx.Args[0]
+
+	switch cmd {
+	case "show":
+		c.showKeymap(ctx)
+	case "load":
+		c.loadKeymap(ctx)
+	case "push":
+		c.pushKeymap(ctx)
+	case "pop":
+		c.popKeymap()
+	case "win":
+		if len(ctx.Args) < 2 {
+			return
+		}
+
+		win, ok := c.source.(*Window)
+		if !ok {
+			editor.AppendError("", "Keymap win subcommands must be executed in a window")
+			return
+		}
+		cmd2 := ctx.Args[1]
+		switch cmd2 {
+		case "push":
+			c.pushWinKeymap(ctx, win)
+		case "pop":
+			c.popWinKeymap(win)
+		case "reset":
+			c.resetWinKeymap(win)
+		default:
+			editor.AppendError("", fmt.Sprintf("No such Keymap win subcommand '%s'", cmd2))
+			return
+		}
+	default:
+		editor.AppendError("", fmt.Sprintf("No such Keymap subcommand '%s'", cmd))
+		return
+
+	}
+}
+
+func (c CommandExecutor) showKeymap(ctx *CmdContext) {
+	if len(ctx.Args) < 2 {
+		editor.AppendError("", fmt.Sprintf("Show what?"))
+		return
+	}
+
+	mode := ctx.Args[1]
+	switch mode {
+	case "def":
+		if len(ctx.Args) < 3 {
+			return
+		}
+		name := ctx.Args[2]
+		def, ok := keymapDefs[name]
+		if !ok {
+			editor.AppendError("", fmt.Sprintf("No keymap '%s' defined", def))
+			return
+		}
+		editor.AppendError("", def.String())
+	case "defs":
+		for _, def := range keymapDefs {
+			editor.AppendError("", fmt.Sprintf("%s\n", def.String()))
+		}
+	case "stack":
+		e := ctx.Editable
+		win, ok := c.source.(*Window)
+		if ok {
+			e = &win.Body.blockEditable.editable
+		}
+		if e != nil {
+			editor.AppendError("", fmt.Sprintf("%s\n", e.keys.String()))
+		}
+	default:
+		editor.AppendError("", fmt.Sprintf("I don't know how to show that about keymaps"))
+		return
+	}
+}
+
+func (c CommandExecutor) loadKeymap(ctx *CmdContext) {
+	if len(ctx.Args) < 2 {
+		return
+	}
+
+	file := ctx.Args[1]
+
+	log(LogCatgCmd, "Loading keymaps from file %s\n", file)
+
+	defs, err := keymap.LoadDefinitionsFromFile(file)
+	if err != nil {
+		editor.AppendError("", fmt.Sprintf("keymap load failed: %v", err))
+		return
+	}
+
+	log(LogCatgCmd, "loaded %d keymap definitions\n", len(defs))
+	for _, def := range defs {
+		log(LogCatgCmd, "%s\n", def.String())
+	}
+
+	for _, def := range defs {
+//		if def.Name == "base" {
+//			log(LogCatgCmd, "Ignoring keymap 'base'")
+//			continue
+//		}
+		buildAndInstallKeymap(def, keyActions)
+	}
+
+}
+
+func (c CommandExecutor) pushKeymap(ctx *CmdContext) {
+	if len(ctx.Args) < 2 {
+		return
+	}
+
+	name := ctx.Args[1]
+	km, ok := keymaps[name]
+	if !ok {
+		editor.AppendError("", fmt.Sprintf("No such keymap '%s'", name))
+		return
+	}
+	globalKeymapStack.Push(km)
+
+}
+
+func (c CommandExecutor) popKeymap() {
+	globalKeymapStack.Pop()
+}
+
+func (c CommandExecutor) pushWinKeymap(ctx *CmdContext, win *Window) {
+	if len(ctx.Args) < 3 {
+		return
+	}
+
+	name := ctx.Args[2]
+	km, ok := keymaps[name]
+	if !ok {
+		editor.AppendError("", fmt.Sprintf("No such keymap '%s'", km))
+		return
+	}
+
+	if win.Body.keys == &globalKeymapStack {
+		win.Body.keys = globalKeymapStack.Clone()
+	}
+
+	win.Body.keys.Push(km)
+
+}
+
+func (c CommandExecutor) popWinKeymap(win *Window) {
+	if win.Body.keys == &globalKeymapStack {
+		// Don't mess up the global keymap
+		return
+	}
+
+	win.Body.keys.Pop()
+}
+
+func (c CommandExecutor) resetWinKeymap(win *Window) {
+	win.Body.keys = &globalKeymapStack
+}
+
+func (c CommandExecutor) CmdNewLayer(ctx *CmdContext) {
+	editor.AddLayer()
+	editor.ActivateLayer(len(editor.Layers) - 1)
+	editor.SignalRedrawRequired()
+}
+
+func (c CommandExecutor) CmdDelLayer(ctx *CmdContext) {
+	editor.DelActiveLayer()
+	editor.SignalRedrawRequired()
+}
+
+func (c CommandExecutor) CmdLayerUp(ctx *CmdContext) {
+	editor.ActivateLayerRelativeToCurrent(+1)
+	editor.SignalRedrawRequired()
+}
+
+func (c CommandExecutor) CmdLayerDown(ctx *CmdContext) {
+	editor.ActivateLayerRelativeToCurrent(-1)
+	editor.SignalRedrawRequired()
+}
+
+func (c CommandExecutor) CmdSetLayer(ctx *CmdContext) {
+	index := 0
+	if len(ctx.Args) < 1 {
+		index = 0
+	}
+
+	index, err := strconv.Atoi(ctx.Args[0])
+	if err != nil {
+		editor.AppendError("", "Lyr command expects a layer index as the first argument")
+		return
+	}
+
+	editor.ActivateLayer(index)
+	editor.SignalRedrawRequired()
+}
+
+func (c CommandExecutor) CmdMoveColUp(ctx *CmdContext) {
+	c.moveColToLayerRelativeToCurrent(ctx, +1)
+	editor.SignalRedrawRequired()
+}
+
+func (c CommandExecutor) CmdMoveColDown(ctx *CmdContext) {
+	c.moveColToLayerRelativeToCurrent(ctx, -1)
+	editor.SignalRedrawRequired()
+}
+
+func (c CommandExecutor) CmdMoveColUpAndChangeActiveLayer(ctx *CmdContext) {
+	c.moveColToLayerRelativeToCurrent(ctx, +1)
+	editor.ActivateLayerRelativeToCurrent(+1)
+	editor.SignalRedrawRequired()
+}
+
+func (c CommandExecutor) CmdMoveColDownAndChangeActiveLayer(ctx *CmdContext) {
+	c.moveColToLayerRelativeToCurrent(ctx, -1)
+	editor.ActivateLayerRelativeToCurrent(-1)
+	editor.SignalRedrawRequired()
+}
+
+func (c CommandExecutor) moveColToLayerRelativeToCurrent(ctx *CmdContext, delta int) {
+	var col *Col
+	switch v := c.source.(type) {
+	case *Window:
+		col = v.col
+	case *Col:
+		col = v
+	}
+
+	editor.MoveColToLayerRelativeToCurrent(col, delta)
+
+}
+
+func (c CommandExecutor) CmdSetLayerName(ctx *CmdContext) {
+	name := ctx.CombinedArgs()
+	editor.SetActiveLayerName(name)	
+}
+

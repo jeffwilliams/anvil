@@ -7,6 +7,7 @@ now=$(date +'%Y-%m-%d_%T')
 ldflags="-X main.buildVersion=$vers -X main.buildTime=$now"
 go_build_flags=""
 make_go_workspace_only=no
+unmake_go_workspace_only=no
 
 function usage() {
   echo "Usage: "
@@ -40,6 +41,9 @@ function parse_opts() {
         ;;
       w)
         make_go_workspace_only=yes
+        ;;
+      W)
+        unmake_go_workspace_only=yes
         ;;
       h)
         usage
@@ -147,14 +151,16 @@ function set_env_for_macos_compile() {
 function determine_binary_name() {
   dir=$1
 
-  binary_name=""
+  binary_name=$(basename $dir)
+  special_binary_name=""
   if [ "$dir" = "../extras/cmd/autodump" ]
   then
-    binary_name=aad
+    special_binary_name=aad
     if [ "$GOOS" = "windows" ]
     then
-      binary_name=aad.exe
+      special_binary_name=aad.exe
     fi
+    binary_name=$special_binary_name
   fi
 }
 
@@ -172,24 +178,25 @@ function build_one_dir() {
   then
     if [ "$dir" = "../editor/cmd/anvil" ]
     then
-      gogio -ldflags "$ldflags" -icon ../../misc/icon/anvil32b.png -buildmode exe -target windows $dir
+      gogio -ldflags "$ldflags" -icon ../editor/misc/icon/anvil32b.png -buildmode exe -target windows $dir
       cp $dir/anvil.exe .
       go build -o anvil-con.exe -ldflags "$ldflags" $go_build_flags $dir
     fi
-  elif [ "$GOOS" = "darwin" ]
-  then
-    go build -ldflags "$ldflags" $go_build_flags $dir
-    rcodesign_errmsg="rcodesign not available, so will not codesign binary.\n"
-    rcodesign_errmsg="$rcodesign_errmsg if you are compiling natively on darwin and not cross compiling, this is fine."
-    rcodesign sign anvil || echo $rcodesign_errmsg
   else
-    if [ "$binary_name" != "" ]
+    if [ "$special_binary_name" != "" ]
     then
-      go build -o $binary_name -ldflags "$ldflags" $go_build_flags $dir
+      go build -o $special_binary_name -ldflags "$ldflags" $go_build_flags $dir
       echo "  note: building $dir as $binary_name"
     else
       go build -ldflags "$ldflags" $go_build_flags $dir
     fi
+  fi
+
+  if [ "$GOOS" = "darwin" ]
+  then
+    rcodesign_errmsg="rcodesign not available, so will not codesign binary.\n"
+    rcodesign_errmsg="$rcodesign_errmsg if you are compiling natively on darwin and not cross compiling, this is fine."
+    rcodesign sign $binary_name || echo $rcodesign_errmsg
   fi
 
   if [ "$GOOS" = "darwin" ]
@@ -281,6 +288,13 @@ function deinit_go_workspace() {
 }
 
 parse_opts $@
+
+if [ "$unmake_go_workspace_only" = "yes" ]
+then
+  deinit_go_workspace
+  exit 0
+fi
+
 
 init_go_workspace
 if [ "$make_go_workspace_only" = "yes" ]

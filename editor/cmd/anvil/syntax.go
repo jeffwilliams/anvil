@@ -267,13 +267,18 @@ LOOP:
 
 		var color *Color
 
-		//log(LogCatgSyntax,"SyntaxHighlighter.Highlight: token category %s, subcat %s, '%s'\n", tok.Type.Category(), tok.Type.SubCategory(), tok)
+		//log(LogCatgSyntax, "SyntaxHighlighter.Highlight: token category %s, subcat %s, '%s'\n", tok.Type.Category(), tok.Type.SubCategory(), tok)
 
 		switch tok.Type.Category() {
 		case syn.Keyword:
 			color = &s.style.KeywordColor
 		case syn.Name:
-			color = &s.style.NameColor
+			if tok.Type == syn.NameTag {
+				// Specifically for HTML use the Keyword color so tags are highlighted with the default syntax color scheme
+				color = &s.style.KeywordColor
+			} else {
+				color = &s.style.NameColor
+			}
 		case syn.Literal:
 			switch tok.Type.SubCategory() {
 			case syn.LiteralString:

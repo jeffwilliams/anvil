@@ -32,6 +32,7 @@ type scrollbar struct {
 type scrollbarStyle struct {
 	FgColor     color.NRGBA
 	BgColor     color.NRGBA
+	BorderColor color.NRGBA
 	GutterWidth unit.Dp
 	LineSpacing unit.Dp
 	Fonts       []FontStyle
@@ -144,8 +145,15 @@ func (b *scrollbar) draw(gtx layout.Context) layout.Dimensions {
 	// Draw a thick bar, then a thin right column
 	st := clip.Rect{
 		Min: image.Pt(0, 0),
-		Max: image.Pt(gtx.Metric.Dp(b.style.GutterWidth), gtx.Constraints.Max.Y)}.Push(gtx.Ops)
+		Max: image.Pt(gtx.Metric.Dp(b.style.GutterWidth-1), gtx.Constraints.Max.Y)}.Push(gtx.Ops)
 	paint.ColorOp{Color: b.style.BgColor}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+	st.Pop()
+
+	st = clip.Rect{
+		Min: image.Pt(gtx.Metric.Dp(b.style.GutterWidth-1), 0),
+		Max: image.Pt(gtx.Metric.Dp(b.style.GutterWidth), gtx.Constraints.Max.Y)}.Push(gtx.Ops)
+	paint.ColorOp{Color: b.style.BorderColor}.Add(gtx.Ops)
 	paint.PaintOp{}.Add(gtx.Ops)
 	st.Pop()
 

@@ -372,3 +372,9 @@ func (a Anvil) Info() (info AnvilInfo, err error) {
 	err = a.GetInto("/info", &info)
 	return
 }
+
+// WindowBodyWriter is a high-level API that returns an io.Writer that when written to
+// appends to the body of the specified window.
+func (a Anvil) WindowBodyWriter(win Window) io.Writer {
+	return newBodyWriter(a, win.Id)
+}

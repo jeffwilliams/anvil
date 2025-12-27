@@ -233,6 +233,78 @@ func (r *Walker) CurrentRunOfSpacesBounds() (startRuneIndex, endRuneIndex int) {
 	return
 }
 
+// CurrentChunk returns the chunksurrounding the current position. A chunk is the current run of
+// identifier characters, whitespace, or symbols.
+func (r *Walker) CurrentChunk() string {
+	right, _ := r.rightChunkBoundary()
+	left, _ := r.leftChunkBoundary()
+	return string(r.bytes[left:right])
+}
+
+func (r *Walker) leftChunkBoundary() (byteIndex, runeIndex int) {
+	return r.leftBoundary(r.chunkBoundaryFunc())
+}
+
+func (r *Walker) rightChunkBoundary() (byteIndex, runeIndex int) {
+	return r.leftBoundary(r.chunkBoundaryFunc())
+}
+
+func (r *Walker) chunkBoundaryFunc() func(rn rune) bool {
+	curRn := ' '
+	if !r.AtEnd() {
+		curRn = r.Rune()
+	}
+
+	if unicode.IsSpace(curRn) {
+		return func(rn rune) bool {
+			return !unicode.IsSpace(rn)
+		}
+	} else if isSymbol(curRn) {
+		return func(rn rune) bool {
+			return unicode.IsSpace(rn) || isValidIdentifierRune(rn)
+		}
+	} else {
+		return func(rn rune) bool {
+			return !isValidIdentifierRune(rn)
+		}
+	}
+}
+
+func (r *Walker) BackwardToChunkStart() {
+	_, eof := r.backward1()
+	if eof {
+		return
+	}
+
+	fn := r.chunkBoundaryFunc()
+
+	for {
+		rn, eof := r.backward1()
+		if eof {
+			return
+		}
+		if fn(rn) {
+			r.forward1()
+			break
+		}
+	}
+}
+
+func (r *Walker) ForwardToChunkEnd() {
+	fn := r.chunkBoundaryFunc()
+
+	for {
+		rn, eof := r.forward1()
+		if eof {
+			return
+		}
+		if fn(rn) {
+			r.backward1()
+			break
+		}
+	}
+}
+
 // CurrentLozengeDelimitedStringInLine returns the string in the line at the current position
 // that is delimited by the lozenge character (◊) on the right and left. If the current position
 // is not delimited by lozenges, isDelimited is false on return.
@@ -636,13 +708,17 @@ func (r *Walker) TextWithinBracketsBounds() (startRuneIndex, endRuneIndex int, e
 	return
 }
 
+func isSymbol(r rune) bool {
+	return !unicode.IsSpace(r) && !isValidIdentifierRune(r)
+}
+
 func (r *Walker) IsInRunOfSymbols() bool {
 	prevRn := '*'
 	if r.bytePos > 0 {
 		prevRn = r.prevRune()
 	}
 
-	if unicode.IsSpace(prevRn) || isValidIdentifierRune(prevRn) {
+	if !isSymbol(prevRn) {
 		return false
 	}
 
@@ -651,7 +727,7 @@ func (r *Walker) IsInRunOfSymbols() bool {
 		curRn = r.Rune()
 	}
 
-	if unicode.IsSpace(curRn) || isValidIdentifierRune(curRn) {
+	if !isSymbol(curRn) {
 		return false
 	}
 

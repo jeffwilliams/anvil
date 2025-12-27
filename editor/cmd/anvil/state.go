@@ -74,28 +74,30 @@ func (a *Application) SetState(state *ApplicationState) error {
 }
 
 type EditorState struct {
-	Tag         *TagState
-	Cols        []*ColState
-	RecentFiles []string
-	Marks       MarkState
+	Tag              *TagState
+	Layers           []*LayerState
+	ActiveLayerIndex int
+	RecentFiles      []string
+	Marks            MarkState
 }
 
 func (e *Editor) State() *EditorState {
 	edTag := e.Tag.State()
 
-	var cols []*ColState
-	for _, c := range e.Cols {
-		cols = append(cols, c.State())
+	var layers []*LayerState
+	for _, l := range e.Layers {
+		layers = append(layers, l.State())
 	}
 
 	// Remove any running jobs, since they won't be running after load.
 	edTag.Text = e.removeJobsFromTag(edTag.Text)
 
 	return &EditorState{
-		Tag:         edTag,
-		Cols:        cols,
-		RecentFiles: editor.recentFiles.All(),
-		Marks:       editor.Marks.State(),
+		Tag:              edTag,
+		Layers:           layers,
+		ActiveLayerIndex: editor.activeLayerIndex,
+		RecentFiles:      editor.recentFiles.All(),
+		Marks:            editor.Marks.State(),
 	}
 
 	//e.focusedEditable
@@ -123,20 +125,16 @@ func (e *Editor) SetState(state *EditorState) error {
 	editor.addJobsToTag()
 
 	// Remove all columns
-	editor.Clear()
+	//editor.Clear()
 
-	anyVisible := false
-	for _, c := range state.Cols {
-		col := editor.NewColDontPosition()
-		col.SetState(c)
-		if col.Visible() {
-			anyVisible = true
-		}
+	editor.Layers = nil
+	for _, layerState := range state.Layers {
+		layer := editor.NewLayer()
+		layer.SetState(layerState)
+		editor.Layers = append(editor.Layers, layer)
 	}
-	if !anyVisible && len(editor.Cols) > 0 {
-		editor.Cols[0].SetVisible(true)
-		editor.ensureFirstVisibleColIsLeftJustified()
-	}
+
+	editor.activeLayerIndex = state.ActiveLayerIndex
 
 	for _, f := range state.RecentFiles {
 		editor.AddRecentFile(f)
@@ -160,6 +158,49 @@ func (t *Tag) SetState(s *TagState) error {
 		return fmt.Errorf("The tag state is nil")
 	}
 	t.SetTextStringNoUndo(s.Text)
+	return nil
+}
+
+type LayerState struct {
+	Name string
+	Cols []*ColState
+}
+
+func (l *Layer) State() *LayerState {
+	var cols []*ColState
+	for _, c := range l.Cols {
+		cols = append(cols, c.State())
+	}
+
+	return &LayerState{
+		Name: l.Name,
+		Cols: cols,
+	}
+}
+
+func (layer *Layer) SetState(state *LayerState) error {
+	if state == nil {
+		return fmt.Errorf("The layer state is nil")
+	}
+
+	layer.Name = state.Name
+
+	// Remove all columns
+	layer.Clear()
+
+	anyVisible := false
+	for _, c := range state.Cols {
+		col := layer.NewColDontPosition()
+		col.SetState(c)
+		if col.Visible() {
+			anyVisible = true
+		}
+	}
+	if !anyVisible && len(layer.Cols) > 0 {
+		layer.Cols[0].SetVisible(true)
+		layer.ensureFirstVisibleColIsLeftJustified()
+	}
+
 	return nil
 }
 

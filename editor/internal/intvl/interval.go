@@ -240,3 +240,8 @@ func Overlaps(a, b Interval) bool {
 	exl := a.End() <= b.Start() || b.End() <= a.Start()
 	return !exl
 }
+
+// Contains returns true if child is contained within or equals parent.
+func Contains(parent, child Interval) bool {
+	return child.Start() >= parent.Start() && child.End() <= parent.End()
+}

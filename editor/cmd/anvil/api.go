@@ -86,9 +86,7 @@ type ApiHandler struct {
 
 func (a ApiHandler) ServeHTTP(rsp http.ResponseWriter, req *http.Request) {
 	if r := recover(); r != nil {
-		dumpPanic(r)
-		dumpLogs()
-		dumpGoroutines()
+		dumpPanicFiles(r)
 		panic(r)
 	}
 
@@ -510,6 +508,7 @@ func (a ApiHandler) insertWindowBodyContent(winId int, rsp http.ResponseWriter, 
 
 func (a ApiHandler) putWindowBodyContent(winId int, rsp http.ResponseWriter, req *http.Request) {
 	a.changeWindowBodyContent(winId, rsp, req, func(win *Window, data []byte) {
+		editor.EnsureWindowIsInCurrentLayer(win)
 		ci := win.Body.blockEditable.firstCursorIndex()
 		tl := win.Body.TopLeftIndex
 		win.Body.SetText(data)
@@ -518,6 +517,7 @@ func (a ApiHandler) putWindowBodyContent(winId int, rsp http.ResponseWriter, req
 		win.Body.AddOpForNextLayout(func(gtx layout.Context) {
 			win.Body.moveCursorTo(gtx, seek{seekType: seekToRunePos, runePos: ci}, dontSelectText)
 			win.Body.TopLeftIndex = tl
+			editor.SetOnlyFlashedWindow(win)
 		})
 	})
 }
@@ -569,8 +569,10 @@ func (a ApiHandler) postWindowBodyContent(winId int, rsp http.ResponseWriter, re
 			return
 		}
 
+		editor.EnsureWindowIsInCurrentLayer(win)
 		win.Body.Append(data)
 		win.SetTagFromDisplayPath()
+		editor.SetOnlyFlashedWindow(win)
 	}
 
 	editor.WorkChan() <- basicWork{fn}
@@ -723,8 +725,8 @@ func (a ApiHandler) putWindowTag(winId int, rsp http.ResponseWriter, req *http.R
 			log(LogCatgAPI, "APIHandler: calculating tag parts failed: %v\n", err)
 		}
 
-		win.displayPath = *NewGlobalPath(file, GlobalPathIsFile)
-		win.loadPath = win.displayPath
+		win.SetDisplayPath(NewGlobalPath(file, GlobalPathIsFile))
+		win.SetLoadPath(win.DisplayPath())
 		win.fileType = typeFile
 		win.initialTagUserArea = ""
 		win.customEdCommands = edArea

@@ -181,6 +181,13 @@ const (
 	dontGrowBodyIfTooSmall
 )
 
+type moveLayerBehaviour int
+
+const (
+	moveToCurrentLayer = iota
+	dontMoveToCurrentLayer
+)
+
 func (l *WindowDataLoad) Kill() {
 	select {
 	case l.DataLoad.Kill <- struct{}{}:
@@ -246,6 +253,7 @@ func (l winLoadData) Service() (done bool) {
 	win.Append(l.data)
 	if l.growBodyBehaviour == growBodyIfTooSmall {
 		win.showIfHidden()
+		editor.EnsureWindowIsInCurrentLayer(win)
 		win.GrowIfBodyTooSmall()
 		editor.SetOnlyFlashedWindow(win)
 	}

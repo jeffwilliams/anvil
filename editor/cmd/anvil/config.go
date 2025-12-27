@@ -15,6 +15,7 @@ import (
 	"gioui.org/text"
 	"github.com/flopp/go-findfont"
 	"github.com/jeffwilliams/anvil/editor/internal/ansi"
+	"github.com/jeffwilliams/anvil/editor/internal/draw"
 	"github.com/jeffwilliams/anvil/editor/internal/typeset"
 	toml "github.com/pelletier/go-toml"
 )
@@ -120,6 +121,13 @@ func LoadStyleFromFile(path string, defaults *Style) (s Style, err error) {
 			s.Fonts[i].FontFace = fnt
 		}
 	}
+
+	ops, err := draw.Parse(s.CursorProg)
+	if err != nil {
+		err = fmt.Errorf("parsing CursorProg property from style failed: %v", err)
+		return
+	}
+	s.compiledCursorProg = ops
 
 	return
 
@@ -309,4 +317,8 @@ func parseDoMatchConfigFile(f io.Reader, onMatch func(re *regexp.Regexp), onDo f
 		}
 	}
 	return
+}
+
+func KeymapConfigFile() string {
+	return filepath.Join(ConfDir, "keymaps")
 }

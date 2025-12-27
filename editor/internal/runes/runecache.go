@@ -11,7 +11,6 @@ import (
 type OffsetCache struct {
 	intvl      int
 	vals       []offsetCacheEntry
-	lastDocLen int
 }
 
 type offsetCacheEntry struct {
@@ -50,6 +49,39 @@ func (c *OffsetCache) ClearAfter(runeOffset int) {
 	}
 
 	c.vals = c.vals[:ndx]
+}
+
+// RemoveFirstNRunes adjusts the cache so that if before the call it described a document `doc`
+// then after the call it describes a document D' where the first n runes of doc have been removed. 
+func (c *OffsetCache) RemoveFirstNRunes(doc []byte, n int) error {
+	if n <= 0 {
+		return nil
+	}
+	
+	// How many entries to remove?
+	ndx := n / c.intvl
+	mod := n % c.intvl
+	if mod != 0 {
+		ndx++
+	}
+
+	if ndx >= len(c.vals) {
+		return nil
+	}
+
+	byteOffset, err, _ := c.Get(doc, n)
+	if err != nil {
+		return err
+	}
+	
+	for i, v := range c.vals[ndx:] {
+		v.runeOffset -= n
+		v.byteOffset -= byteOffset
+		c.vals[i] = v
+	}
+
+	c.vals = c.vals[:ndx]
+	return nil
 }
 
 type invalidUTF8Offset struct {
@@ -100,14 +132,6 @@ OUT:
 		c.add(runeOff, byteOff)
 	}
 	return
-}
-
-func (c *OffsetCache) shouldUpdateBecauseDocChanged(doc []byte) bool {
-	b := c.lastDocLen != len(doc)
-	if b {
-		c.lastDocLen = len(doc)
-	}
-	return b
 }
 
 func (c *OffsetCache) addInitialZeroEntryIfNeeded() {
@@ -161,4 +185,14 @@ func (c *OffsetCache) Get(doc []byte, runeOffset int) (byteOffset int, err error
 
 	runeCount = curRuneOffset
 	return
+}
+
+func (c *OffsetCache) Clone(runeOffset int) OffsetCache {
+	clone := OffsetCache{
+		intvl: c.intvl,
+		vals: make([]offsetCacheEntry, len(c.vals)),
+	}
+	
+	copy(clone.vals, c.vals)
+	return clone
 }

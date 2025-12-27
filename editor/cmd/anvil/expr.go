@@ -300,9 +300,7 @@ func (ex *EditableExprExecutor) runInterpreterAsync(initialRanges []expr.Range) 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				dumpPanic(r)
-				dumpLogs()
-				dumpGoroutines()
+				dumpPanicFiles(r)
 				panic(r)
 			}
 		}()

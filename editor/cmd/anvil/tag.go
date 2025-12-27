@@ -23,6 +23,7 @@ func (t *Tag) Init(body *Body, style blockStyle, editableStyle editableStyle, ex
 		owner:    owner,
 	})
 	t.AddTextChangeListener(t.highlightBasenameOnTextChange)
+	t.blockEditable.editable.shouldOmitWinPathWhenAcquiring = t.shouldOmitWinPathWhenAcquiring
 }
 
 func (t Tag) Parts() (path, editorArea, userArea string, err error) {
@@ -57,19 +58,43 @@ func (t *Tag) Set(path, editorArea, userArea string) {
 }
 
 func (t *Tag) setFgAndBgColors(path string) {
-	if IsErrorsWindow(path) || IsLiveWindow(path) {
-		if t.flash {
-			t.blockEditable.bgcolor = t.blockEditable.style.ErrorFlashBgColor
-			t.blockEditable.editable.style.FgColor = Color(t.blockEditable.style.ErrorFlashFgColor)
-		} else {
-			t.blockEditable.bgcolor = t.blockEditable.style.ErrorBgColor
-			t.blockEditable.editable.style.FgColor = Color(t.blockEditable.style.ErrorFgColor)
-		}
+	defer t.blockEditable.editable.invalidateLayedoutText()
+
+	useErrorWinColors := IsErrorsWindow(path) || IsLiveWindow(path)
+	permittedToUseFlashColors := useErrorWinColors || BasenameLikelyStartsWith(path, '+')
+
+	if permittedToUseFlashColors && t.flash {
+		t.blockEditable.bgcolor = t.blockEditable.style.ErrorFlashBgColor
+		t.blockEditable.editable.style.FgColor = Color(t.blockEditable.style.ErrorFlashFgColor)
+		return	
+	}
+
+	if useErrorWinColors {
+		t.blockEditable.bgcolor = t.blockEditable.style.ErrorBgColor
+		t.blockEditable.editable.style.FgColor = Color(t.blockEditable.style.ErrorFgColor)
 	} else {
 		t.blockEditable.bgcolor = t.blockEditable.style.StandardBgColor
 		t.blockEditable.editable.style.FgColor = Color(t.blockEditable.style.StandardFgColor)
 	}
-	t.blockEditable.editable.invalidateLayedoutText()
+}
+
+func BasenameLikelyStartsWith(path string, r rune) bool {
+	// This function doesn't handle the case of filenames on Unix that contain a backslash properly. Hence the "Likely"
+
+	if len(path) == 0 {
+		return false
+	}
+
+	i := strings.LastIndexAny(path, "\\/")
+	if i < 0 {
+		return rune(path[0]) == r
+	}
+
+	if i == len(path)-1 {
+		return false
+	}
+
+	return rune(path[i+1]) == r
 }
 
 func (t *Tag) pathBasenameColor(path string) Color {
@@ -180,4 +205,21 @@ func (t *Tag) highlightBasenameOnTextChange(ch *TextChange) {
 	}
 
 	t.highlightBasename(path)
+}
+
+func (t *Tag) shouldOmitWinPathWhenAcquiring(r *textRange) bool {
+	// Specifically if we are acquiring part of the path of the window then behave specially
+	_, parts, err := t.calcParts()
+	if err != nil {
+		return false
+	}
+
+	p := NewTextRange(parts.path[0], parts.path[1])
+
+	if p.Contains(r) {
+		log(LogCatgEd, "Tag.shouldOmitWinPathWhenAcquiring: The text range for the path of the window contains the text being acquired")
+		return true
+	}
+
+	return false
 }

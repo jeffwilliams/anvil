@@ -1,6 +1,9 @@
 package slice
 
-import "reflect"
+import (
+	"reflect"
+	"strings"
+)
 
 // RemoveFirstMatchFromSlice removes the first matching element from the slice `x` and returns the
 // slice. it does NOT preserve the order of the slice.
@@ -92,4 +95,14 @@ func FindAndMoveToEnd(x interface{}, matches func(i int) bool) {
 		}
 		ndx++
 	}
+}
+
+func StringsHavingPrefix(list []string, prefix string) []string {
+	r := make([]string, 0, len(list))
+	for _, n := range list {
+		if strings.HasPrefix(n, prefix) {
+			r = append(r, n)
+		}
+	}
+	return r
 }

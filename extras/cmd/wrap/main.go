@@ -5,18 +5,18 @@ package main
 
 import (
 	"bytes"
+	_ "embed"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"strconv"
 	"unicode"
-	_ "embed"
 
 	"github.com/speedata/hyphenation"
 )
 
-
 // Hyphenation file, taken from https://ctan.math.utah.edu/ctan/tex-archive/language/hyph-utf8/tex/generic/hyph-utf8/patterns/txt/
+//
 //go:embed hyph-en-gb.pat.txt
 var hyphenPatternFile []byte
 
@@ -80,8 +80,8 @@ func (w wrapper) wrap(runes []rune) {
 
 		w.word.WriteRune(r)
 	}
-	
-     w.outputWord()
+
+	w.outputWord()
 	fmt.Printf("\n")
 }
 
@@ -93,7 +93,7 @@ func (w *wrapper) spaceEncountered(r rune) {
 			w.lineLen++
 		}
 	}
-	
+
 	if w.anotherRuneTooLong() {
 		w.newline()
 		return
@@ -138,7 +138,7 @@ func (w *wrapper) outputLongWord() {
 			return
 		}
 	}
-	
+
 	fmt.Printf("\n%s", s)
 	w.lineLen = w.word.RuneLen()
 	w.word.Reset()
@@ -157,7 +157,7 @@ func (w wrapper) hyphenate(s string) []int {
 	breaks := w.h.Hyphenate(s)
 	// Don't break at positions <= 1
 	for len(breaks) > 0 && breaks[0] <= 1 {
-		breaks = breaks[1:]	
+		breaks = breaks[1:]
 	}
 	return breaks
 }
@@ -181,12 +181,12 @@ type Buffer struct {
 
 func (b *Buffer) Reset() {
 	b.Buffer.Reset()
-	b.runeLen = 0	
+	b.runeLen = 0
 }
 
 func (b *Buffer) WriteRune(r rune) {
 	b.Buffer.WriteRune(r)
-	b.runeLen++		
+	b.runeLen++
 }
 
 func (b *Buffer) WriteRunes(r []rune) {
@@ -198,4 +198,3 @@ func (b *Buffer) WriteRunes(r []rune) {
 func (b *Buffer) RuneLen() int {
 	return b.runeLen
 }
-
