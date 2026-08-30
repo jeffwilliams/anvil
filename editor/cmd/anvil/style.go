@@ -47,6 +47,14 @@ type Style struct {
 	Ansi                            AnsiStyle
 	LineSpacing                     unit.Dp
 	TextLeftPadding                 unit.Dp
+	TextRightPadding                unit.Dp
+	TextBottomPadding               unit.Dp
+	TrayFgColor                     Color
+	TrayBgColor                     Color
+	TrayInnerBorderColor            Color
+	TrayInnerBorderWidth            unit.Dp
+	TrayOuterBorderColor            Color
+	TrayOuterBorderWidth            unit.Dp
 	CursorProg                      string
 	compiledCursorProg              []draw.Op
 }
@@ -101,8 +109,10 @@ func (s Style) tagEditableStyle() editableStyle {
 			FgColor: s.ExecutionSelectionFgColor,
 			BgColor: s.ExecutionSelectionBgColor,
 		},
-		TabStopInterval: s.TabStopInterval,
-		TextLeftPadding: s.TextLeftPadding,
+		TabStopInterval:   s.TabStopInterval,
+		TextLeftPadding:   s.TextLeftPadding,
+		TextRightPadding:  s.TextRightPadding,
+		TextBottomPadding: s.TextBottomPadding,
 	}
 }
 
@@ -144,9 +154,11 @@ func (s Style) bodyEditableStyle() editableStyle {
 			FgColor: s.ExecutionSelectionFgColor,
 			BgColor: s.ExecutionSelectionBgColor,
 		},
-		TabStopInterval: s.TabStopInterval,
-		TabStopPadding:  s.TabStopPadding,
-		TextLeftPadding: s.TextLeftPadding,
+		TabStopInterval:   s.TabStopInterval,
+		TabStopPadding:    s.TabStopPadding,
+		TextLeftPadding:   s.TextLeftPadding,
+		TextRightPadding:  s.TextRightPadding,
+		TextBottomPadding: s.TextBottomPadding,
 	}
 }
 
@@ -169,6 +181,24 @@ func (s Style) scrollbarStyle() scrollbarStyle {
 		GutterWidth: s.GutterWidth,
 		Fonts:       s.Fonts,
 	}
+}
+
+func (s Style) trayStyle() floatStyle {
+	fs := floatStyle{
+		InnerBorderColor: s.TrayInnerBorderColor,
+		InnerBorderWidth: s.TrayInnerBorderWidth,
+		OuterBorderColor: s.TrayOuterBorderColor,
+		OuterBorderWidth: s.TrayOuterBorderWidth,
+		blockStyle:       s.tagBlockStyle(),
+		editableStyle:    s.tagEditableStyle(),
+	}
+
+	fs.blockStyle.StandardBgColor = color.NRGBA(s.TrayBgColor)
+	fs.blockStyle.StandardFgColor = color.NRGBA(s.TrayFgColor)
+	fs.editableStyle.BgColor = s.TrayBgColor
+	fs.editableStyle.FgColor = s.TrayFgColor
+
+	return fs
 }
 
 func MustParseHexColor(s string) (c Color) {
@@ -279,4 +309,47 @@ func ColorFromName(name string) (c Color, ok bool) {
 
 func (c Color) String() string {
 	return fmt.Sprintf("\"#%02x%02x%02x\"", c.R, c.G, c.B)
+}
+
+// ParseTint parses a special formatted foreground and background color descriptor.
+// Tints have the form 'FG/BG' where one of FG or BG or both must be present. FG or
+// BG can be either a color name or an RGB color code of the form #RRGGBB
+func ParseTint(tint string) (fg, bg Color, err error) {
+	parseColor := func(s string) (Color, error) {
+		color, ok := ColorFromName(s)
+		if ok {
+			return color, nil
+		}
+
+		color, err := ParseHexColor(s)
+		return color, err
+	}
+
+	var err1, err2 error
+	i := strings.Index(tint, "/")
+	if i < 0 {
+		fg, err1 = parseColor(tint)
+	} else {
+		if tint[0] == '/' {
+			bg, err1 = parseColor(tint[1:])
+		} else {
+			parts := strings.Split(tint, "/")
+			fg, err1 = parseColor(parts[0])
+			bg, err2 = parseColor(parts[1])
+		}
+	}
+
+	if err1 != nil {
+		err = err1
+	}
+
+	if err2 != nil {
+		err = err2
+	}
+
+	return
+}
+
+func ToHexColor(c Color) string {
+	return fmt.Sprintf("#%x%x%x", c.R, c.G, c.B)
 }

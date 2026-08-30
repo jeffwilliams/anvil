@@ -58,6 +58,15 @@ func ExpandEscapes(s string) string {
 // Try and expand a string of the form "..." or '...' that might contain
 // escapes for \" and \'.
 func ExpandEscapesAndUnquote(s string) (string, error) {
+	s, err := Unquote(s)
+	if err != nil {
+		return s, err
+	}
+
+	return ExpandEscapes(s), nil
+}
+
+func Unquote(s string) (string, error) {
 	s = strings.TrimSpace(s)
 
 	if len(s) == 0 {
@@ -77,5 +86,24 @@ func ExpandEscapesAndUnquote(s string) (string, error) {
 		return "", fmt.Errorf("missing end quote")
 	}
 
-	return ExpandEscapes(s[1 : len(s)-1]), nil
+	return s[1 : len(s)-1], nil
+}
+
+func MustUnquote(s string) string {
+	s = strings.TrimSpace(s)
+
+	if len(s) <= 1 {
+		return s
+	}
+
+	quote := s[0]
+	if quote != '\'' && quote != '"' {
+		return s
+	}
+
+	if s[len(s)-1] != quote {
+		return s
+	}
+
+	return s[1 : len(s)-1]
 }

@@ -3,10 +3,11 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"github.com/jeffwilliams/anvil/editor/internal/circ"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/jeffwilliams/anvil/editor/internal/circ"
 )
 
 type CommandHistory struct {

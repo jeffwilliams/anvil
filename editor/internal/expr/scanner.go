@@ -228,6 +228,23 @@ func (s *Scanner) nextNonSpaceRune() rune {
 	return r
 }
 
+func (s *Scanner) peekNonSpaceRuneAfterNext() rune {
+	var r rune
+	pos := s.pos + 1
+	for {
+		if pos >= len(s.input) {
+			return 0
+		}
+
+		r = s.input[pos]
+		if !unicode.IsSpace(r) {
+			break
+		}
+		pos++
+	}
+	return r
+}
+
 func (s *Scanner) delimitedStringsFollowingToken(tok token) int {
 	if s.lastToken().tokenType() == opTok {
 		switch s.lastToken().value {

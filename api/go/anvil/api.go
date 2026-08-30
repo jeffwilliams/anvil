@@ -107,6 +107,9 @@ func (a Anvil) Get(path string) (rsp *http.Response, err error) {
 // the encoding/json package.
 func (a Anvil) GetInto(path string, resp interface{}) (err error) {
 	rsp, err := a.Get(path)
+	if err != nil {
+		return
+	}
 	raw, err := ioutil.ReadAll(rsp.Body)
 	err = prefixError(err, "Error reading body info")
 	if err != nil {
@@ -151,6 +154,23 @@ func (a Anvil) Put(path string, body io.Reader) (rsp *http.Response, err error) 
 		return
 	}
 	err = checkHttpError(rsp, fmt.Sprintf("PUT to %s failed", url))
+	return
+}
+
+// Delete is a low-level API that performs an HTTP DELETE request to
+// Anvil and returns the response.
+func (a Anvil) Delete(path string) (rsp *http.Response, err error) {
+	req, url, err := a.buildReq(http.MethodDelete, path, nil)
+	if err != nil {
+		return
+	}
+
+	rsp, err = a.client.Do(req)
+	err = prefixError(err, fmt.Sprintf("DELETE to %s failed", url))
+	if err != nil {
+		return
+	}
+	err = checkHttpError(rsp, fmt.Sprintf("DELETE to %s failed", url))
 	return
 }
 
@@ -308,6 +328,11 @@ func (a Anvil) SetWindowBody(win Window, body io.Reader) (err error) {
 	return
 }
 
+func (a Anvil) SetWindowBodyLeaveCursors(win Window, body io.Reader) (err error) {
+	_, err = a.Put(fmt.Sprintf("/wins/%d/body?setcursor=false", win.Id), body)
+	return
+}
+
 func (a Anvil) SetWindowBodyString(win Window, body string) (err error) {
 	var buf bytes.Buffer
 	buf.WriteString(body)
@@ -360,6 +385,18 @@ func (a Anvil) WindowBodyCursors(win Window) (cursors []int, err error) {
 	return
 }
 
+func (a Anvil) SetWindowBodyCursors(win Window, cursors []int) error {
+
+	b, err := json.Marshal(cursors)
+	if err != nil {
+		err = fmt.Errorf("marshalling cursors to JSON failed: %v", err)
+		return err
+	}
+	rdr := bytes.NewReader(b)
+	_, err = a.Put(fmt.Sprintf("/wins/%d/body/cursors", win.Id), rdr)
+	return nil
+}
+
 func (a Anvil) RegisterCommands(names ...string) error {
 	var buf bytes.Buffer
 	l := strings.Join(names, `","`)
@@ -371,4 +408,96 @@ func (a Anvil) RegisterCommands(names ...string) error {
 func (a Anvil) Info() (info AnvilInfo, err error) {
 	err = a.GetInto("/info", &info)
 	return
+}
+
+// WindowBodyWriter is a high-level API that returns an io.Writer that when written to
+// appends to the body of the specified window.
+func (a Anvil) WindowBodyWriter(win Window) io.Writer {
+	return newBodyWriter(a, win.Id)
+}
+
+func (a Anvil) RegisterForWindowNotification(win Window, op NotificationOp) (err error) {
+	var opname string
+	switch op {
+	case NotificationOpInsert:
+		opname = "insert"
+	case NotificationOpDelete:
+		opname = "delete"
+	case NotificationOpKeyPress:
+		opname = "keyPress"
+	case NotificationOpTextInput:
+		opname = "textInput"
+	default:
+		return fmt.Errorf("registering for notification %d for a window is not supported\n", op)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString(opname)
+	_, err = a.Post(fmt.Sprintf("/wins/%d/register", win.Id), &buf)
+	return
+}
+
+func (a Anvil) UnregisterForWindowNotification(win Window, op NotificationOp) (err error) {
+	var opname string
+	switch op {
+	case NotificationOpInsert:
+		opname = "insert"
+	case NotificationOpDelete:
+		opname = "delete"
+	case NotificationOpKeyPress:
+		opname = "keyPress"
+	case NotificationOpTextInput:
+		opname = "textInput"
+	default:
+		return fmt.Errorf("unregistering for notification %d for a window is not supported\n", op)
+	}
+
+	_, err = a.Delete(fmt.Sprintf("/wins/%d/register/%s", win.Id, opname))
+	return
+}
+
+func (a Anvil) WindowBodyKeypress(win Window, KeyName string, Modifiers int) (err error) {
+	k := KeyPress{KeyName, Modifiers}
+	b, err := json.Marshal(k)
+	if err != nil {
+		err = fmt.Errorf("marshalling cursors to JSON failed: %v", err)
+		return err
+	}
+	rdr := bytes.NewReader(b)
+	_, err = a.Put(fmt.Sprintf("/wins/%d/body/keypress", win.Id), rdr)
+	return nil
+}
+
+func (a Anvil) WindowBodyTints(win Window) (tints []Tint, err error) {
+	err = a.GetInto(fmt.Sprintf("/wins/%d/body/tint", win.Id), &tints)
+	return
+}
+
+func (a Anvil) SetWindowBodyTints(win Window, tints []Tint) error {
+
+	b, err := json.Marshal(tints)
+	if err != nil {
+		err = fmt.Errorf("marshalling cursors to JSON failed: %v", err)
+		return err
+	}
+	rdr := bytes.NewReader(b)
+	_, err = a.Put(fmt.Sprintf("/wins/%d/body/tint", win.Id), rdr)
+	return nil
+}
+
+func (a Anvil) AddWindowBodyTints(win Window, tints []Tint) error {
+
+	b, err := json.Marshal(tints)
+	if err != nil {
+		err = fmt.Errorf("marshalling cursors to JSON failed: %v", err)
+		return err
+	}
+	rdr := bytes.NewReader(b)
+	_, err = a.Post(fmt.Sprintf("/wins/%d/body/tint", win.Id), rdr)
+	return nil
+}
+
+func (a Anvil) ClearWindowBodyTints(win Window) error {
+	_, err := a.Delete(fmt.Sprintf("/wins/%d/body/tint", win.Id))
+	return err
 }

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -156,6 +157,7 @@ type simpleFs interface {
 	execAsync(execCtx) (err error)
 	contentsAsync(path string, names chan []string, contents chan []byte, errs chan error, kill chan struct{}) (err error)
 	getEnvAsync(name, path string, val chan string, errs chan error, kill chan struct{}) (err error)
+	mkdir(path string) (err error)
 }
 
 type execCtx struct {
@@ -213,7 +215,9 @@ func (f localFs) loadFileAsync(path string, contents chan []byte, errs chan erro
 	}
 
 	go func() {
-		copyBlocks(file, contents, 1024*1024, errs, kill)
+		pipe := make(chan []byte)
+		go copyBlocks(file, pipe, 1024*1024, errs, kill)
+		mergeChunksThatSplitUTF8Rune(pipe, contents)
 		close(errs)
 	}()
 	return
@@ -270,6 +274,34 @@ func copyBlocks(source io.Reader, dest chan []byte, blocksize int, errs chan err
 		dest <- b
 
 		updateBlockSize()
+	}
+}
+
+func mergeChunksThatSplitUTF8Rune(source, dest chan []byte) {
+	defer close(dest)
+
+	var buf bytes.Buffer
+
+	for chunk := range source {
+		r, _ := utf8.DecodeLastRune(chunk)
+
+		if r == utf8.RuneError {
+			buf.Write(chunk)
+			continue
+		}
+
+		if buf.Len() > 0 {
+			buf.Write(chunk)
+			dest <- buf.Bytes()
+			buf.Reset()
+			continue
+		}
+
+		dest <- chunk
+	}
+
+	if buf.Len() > 0 {
+		dest <- buf.Bytes()
 	}
 }
 
@@ -451,6 +483,10 @@ func (f localFs) setupForAsyncExec(c execCtx) (cmd *exec.Cmd, stdout, stderr io.
 	go copyBlocks(stderr, c2, 1024*1024, c.errs, nil)
 
 	return
+}
+
+func (f localFs) mkdir(path string) (err error) {
+	return os.Mkdir(path, 0755)
 }
 
 func (f localFs) getEnvAsync(name, path string, val chan string, errs chan error, kill chan struct{}) (err error) {
@@ -686,7 +722,9 @@ func (f *sshFs) loadFileAsync(path string, contents chan []byte, errs chan error
 		}
 
 		go func() {
-			copyBlocks(stdout, contents, 4096, errs, kill)
+			pipe := make(chan []byte)
+			go copyBlocks(stdout, pipe, 4096, errs, kill)
+			mergeChunksThatSplitUTF8Rune(pipe, contents)
 			session.Close()
 			close(errs)
 		}()
@@ -835,7 +873,6 @@ func (f *sshFs) filenamesInDirAsync(path string, names chan []string, errs chan 
 }
 
 func (f *sshFs) filenamesInDirsAsync(runpath string, dirs []string, names chan []string, errs chan error, kill chan struct{}) (err error) {
-	fmt.Printf("sshFs.filenamesInDirsAsync: called\n")
 	_, session, _, err := f.splitFilenameAndMakeSession(runpath, kill)
 	if err != nil {
 		return
@@ -917,7 +954,10 @@ func (f sshFs) execAsync(c execCtx) (err error) {
 		forceClosedSession := newSemchan()
 
 		go func() {
-			<-c.kill
+			_, ok := <-c.kill
+			if !ok {
+				return
+			}
 			log(LogCatgFS, "sshFs.exec: kill received. Closing session\n")
 			// See https://github.com/golang/go/issues/16597
 			session.Signal(ssh.SIGKILL)
@@ -942,6 +982,7 @@ func (f sshFs) execAsync(c execCtx) (err error) {
 				c.errs <- err
 			}
 			close(c.errs)
+			close(c.kill)
 			if c.done != nil {
 				close(c.done)
 			}
@@ -1019,8 +1060,9 @@ func (f sshFs) setupForAsyncExec(c execCtx) (session *ssh.Session, cmd string, a
 	if err != nil {
 		log(LogCatgFS, "%v\n", err)
 	}
-	session.Setenv("ANVIL_API_PORT", strconv.Itoa(client.ListenerPort()))
-	session.Setenv("ANVIL_API_SESS", string(apiSess.Id()))
+
+	client.SetenvAsync(session, "ANVIL_API_PORT", strconv.Itoa(client.ListenerPort()))
+	client.SetenvAsync(session, "ANVIL_API_SESS", string(apiSess.Id()))
 
 	if c.extraEnv != nil {
 		names, values, err := c.extraEnvNamesAndValues()
@@ -1034,7 +1076,7 @@ func (f sshFs) setupForAsyncExec(c execCtx) (session *ssh.Session, cmd string, a
 
 		for i, n := range names {
 			log(LogCatgFS, "sshFs.execAsync: setting env var %s=%s\n", n, values[i])
-			session.Setenv(n, values[i])
+			client.SetenvAsync(session, n, values[i])
 		}
 
 	}
@@ -1088,7 +1130,10 @@ func (f sshFs) getEnvAsync(name, path string, val chan string, errs chan error, 
 		forceClosedSession := newSemchan()
 
 		go func() {
-			<-kill
+			_, ok := <-kill
+			if !ok {
+				return
+			}
 			log(LogCatgFS, "sshFs.getEnvAsync: kill received. Closing session\n")
 			// See https://github.com/golang/go/issues/16597
 			session.Signal(ssh.SIGKILL)
@@ -1124,6 +1169,7 @@ func (f sshFs) getEnvAsync(name, path string, val chan string, errs chan error, 
 				log(LogCatgFS, "sshFs.getEnvAsync: sending error on chan\n")
 				errs <- err
 			}
+			close(kill)
 			close(errs)
 		}()
 
@@ -1156,6 +1202,21 @@ func (f sshFs) maybeServeAPIOverSshClient(client *SshClient) (err error) {
 	client.userData = true
 
 	return nil
+}
+
+func (f sshFs) mkdir(path string) (err error) {
+	file, session, _, err := f.splitFilenameAndMakeSession(path, nil)
+	if err != nil {
+		return
+	}
+	defer session.Close()
+
+	log(LogCatgFS, "sshFs.mkdir: making directory %s\n", path)
+
+	cmd := fmt.Sprintf("%s -c 'mkdir \"%s\"'", f.getShell(), file)
+	log(LogCatgFS, "sshFs.mkdir: running command: %s\n", cmd)
+	_, err = session.Output(cmd)
+	return
 }
 
 var winInvalidPathSyntaxErr = syscall.Errno(123)

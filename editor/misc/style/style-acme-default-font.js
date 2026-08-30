@@ -33,6 +33,12 @@
   "ErrorsTagFlashFgColor": "#FFFFEC",
   "ErrorsTagFlashBgColor": "#B85C57",
   "ErrorsTagFlashPathBasenameColor" : "#FFFFEC",
+  "TrayFgColor": "#424242",
+  "TrayBgColor": "#EEFEFF",
+  "TrayInnerBorderColor": "#999957",
+  "TrayInnerBorderWidth": 1,
+  "TrayOuterBorderColor": "#FFFFEC",
+  "TrayOuterBorderWidth": 1,
   "TabStopInterval": 30,
   "Syntax": {
     "KeywordColor": "#424242",

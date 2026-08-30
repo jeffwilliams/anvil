@@ -2,10 +2,11 @@ package main
 
 import (
 	"fmt"
-	"github.com/jeffwilliams/anvil/api/go/anvil"
 	"io/ioutil"
 	"os"
 	"strings"
+
+	"github.com/jeffwilliams/anvil/api/go/anvil"
 )
 
 var (
@@ -181,25 +182,17 @@ func handleExecNotification(notif *anvil.Notification) {
 	}
 
 	cmd := notif.Cmd
-	if cmd[0] != "L" {
-		return
-	}
 
-	if len(cmd) == 1 {
-		//updateDefsForWindow(win, dontForce)
-		return
-	}
-
-	switch cmd[1] {
-	case "-h":
+	switch cmd[0] {
+	case "Lhelp":
 		printHelp()
-	case "def":
+	case "Ldef":
 		cmdDef(win, cmd)
-	case "decl":
+	case "Ldecl":
 		cmdDecl(win, cmd)
-	case "refs":
+	case "Lrefs":
 		cmdRefs(win, cmd)
-	case "hov":
+	case "Lhov":
 		cmdHover(win, cmd)
 	}
 
@@ -209,13 +202,15 @@ func printHelp() {
 	fmt.Printf("Anvil clangd client\n")
 	fmt.Printf("This program interacts with LSP servers\n")
 	fmt.Printf("Commands: \n")
-	fmt.Printf("  L def\n")
+	fmt.Printf("  Lhelp\n")
+	fmt.Printf("    Print this help\n")
+	fmt.Printf("  Ldef\n")
 	fmt.Printf("    Find the definition of the symbol under the cursor and acquire it\n")
-	fmt.Printf("  L decl\n")
+	fmt.Printf("  Ldecl\n")
 	fmt.Printf("    Find the declaration of the symbol under the cursor and acquire it\n")
-	fmt.Printf("  L refs\n")
+	fmt.Printf("  Lrefs\n")
 	fmt.Printf("    Find references to the symbol\n")
-	fmt.Printf("  L hov\n")
+	fmt.Printf("  Lhov\n")
 	fmt.Printf("    Print hover information for the symbol under the cursor\n")
 }
 

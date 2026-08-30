@@ -19,12 +19,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/jeffwilliams/anvil/api/go/anvil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/jeffwilliams/anvil/api/go/anvil"
 
 	"github.com/ogier/pflag"
 )

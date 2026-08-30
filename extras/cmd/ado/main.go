@@ -2,8 +2,9 @@ package main
 
 import (
 	"fmt"
-	"github.com/jeffwilliams/anvil/api/go/anvil"
 	"os"
+
+	"github.com/jeffwilliams/anvil/api/go/anvil"
 
 	"github.com/ogier/pflag"
 )

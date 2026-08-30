@@ -63,6 +63,10 @@ func (s textRange) Overlaps(o *textRange) bool {
 	return intvl.Overlaps(s, o)
 }
 
+func (s textRange) Contains(o *textRange) bool {
+	return intvl.Contains(s, o)
+}
+
 func (s textRange) Valid() bool {
 	return s.end >= 0 && s.start >= 0 && s.end >= s.start
 }
@@ -335,13 +339,22 @@ const (
 
 func (e *editable) copySelections() []*selection {
 	rc := make([]*selection, len(e.selections))
-
-	for i, s := range e.selections {
-		newS := &selection{}
-		*newS = *s
-		rc[i] = newS
-	}
+	copy(rc, e.selections)
 	return rc
+}
+
+func (e *editable) selectionsEqual(other []*selection) bool {
+	if len(e.selections) != len(other) {
+		return false
+	}
+
+	for i, v := range e.selections {
+		if v != other[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (e *editable) selectionsInDisplayOrder() []*selection {

@@ -2,15 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"unicode/utf8"
 
 	"gioui.org/layout"
+	"github.com/Takatochi/go-tee-lib/tee"
 	"github.com/jeffwilliams/anvil/editor/internal/escape"
 	"github.com/jeffwilliams/anvil/editor/internal/expr"
 	"github.com/jeffwilliams/anvil/editor/internal/pctbl"
 	"github.com/jeffwilliams/anvil/editor/internal/runes"
+	"github.com/jeffwilliams/anvil/editor/internal/sync"
 )
+
+var ExprHandlerBatchSize = 200
 
 type ExprHandler struct {
 	pieceTable pctbl.Table
@@ -24,15 +29,14 @@ type ExprHandler struct {
 	cursorIndex     int
 	toCopy          bytes.Buffer
 	runeOffsetCache *runes.OffsetCache
+	batch           []exprHandlerOp
 }
 
 func (handler *ExprHandler) Delete(r expr.Range) {
 	l := r.End() - r.Start()
 	log(LogCatgExpr, "editable expr handler: performing delete of length %d at %d", l, r.Start())
 	handler.clearRuneOffsetCache()
-	handler.sendWork(func() {
-		handler.editable.deleteFromPieceTableUndoIndex(r.Start(), l, handler.cursorIndex)
-	})
+	handler.sendDelete(r.Start(), l)
 }
 
 func (handler *ExprHandler) Copy(r expr.Range) {
@@ -41,20 +45,13 @@ func (handler *ExprHandler) Copy(r expr.Range) {
 	handler.toCopy.Write(b)
 	log(LogCatgExpr, "editable expr handler: performing copy of %d to %d", r.Start(), r.End())
 
-	handler.sendWork(func() {
-		handler.selectRange(r)
-	})
+	handler.sendSelectRange(r)
 }
 
 func (handler *ExprHandler) Insert(index int, value []byte) {
 	log(LogCatgExpr, "editable expr handler: performing insert of '%s' at %d", string(value), index)
-	l := utf8.RuneCount(value)
 	handler.clearRuneOffsetCache()
-	handler.sendWork(func() {
-		handler.editable.insertToPieceTableUndoIndex(index, string(value), handler.cursorIndex)
-		s := NewSelection(index, index+l, Right)
-		handler.selectRange(s)
-	})
+	handler.sendInsert(index, value)
 }
 
 func (handler *ExprHandler) Display(r expr.Range) {
@@ -149,24 +146,16 @@ func (handler *ExprHandler) DisplayContents(r expr.Range, prefix string, display
 		fmt.Fprintf(&handler.toDisplay, "%s:%d:%d ", handler.file, sline, scol)
 	}
 	handler.toDisplay.Write(b)
-
-	handler.sendWork(func() {
-		handler.selectRange(r)
-	})
+	handler.sendSelectRange(r)
 }
 
-func (handler ExprHandler) Noop(r expr.Range) {
-	handler.sendWork(func() {
-		handler.selectRange(r)
-	})
+func (handler *ExprHandler) Noop(r expr.Range) {
+	handler.sendSelectRange(r)
 }
 
-func (handler ExprHandler) selectRange(r expr.Range) {
-	handler.editable.AddSelection(r.Start(), r.End())
-}
-
-func (handler ExprHandler) Done() {
-	handler.sendWork(handler.done)
+func (handler *ExprHandler) Done() {
+	handler.sendBatchWork(handler.batch)
+	handler.sendFnWork(handler.done)
 }
 
 func (handler ExprHandler) done() {
@@ -185,8 +174,49 @@ func (handler ExprHandler) done() {
 	}
 }
 
-func (handler ExprHandler) sendWork(f func()) {
-	editor.WorkChan() <- exprHandlerWork{handler.editable, f}
+func (handler *ExprHandler) sendSelectRange(r expr.Range) {
+	var op exprHandlerOp
+	op.opcode = exprHandlerOpcodeSelectRange
+	rangeStart, rangeEnd := op.PropsForSelect()
+	*rangeStart, *rangeEnd = r.Start(), r.End()
+
+	handler.addToBatchAndSendIfFull(op)
+}
+
+func (handler *ExprHandler) sendDelete(start, len int) {
+	var op exprHandlerOp
+	op.opcode = exprHandlerOpcodeDelete
+	opStart, opLen := op.PropsForDelete()
+	*opStart, *opLen = start, len
+
+	handler.addToBatchAndSendIfFull(op)
+}
+
+func (handler *ExprHandler) sendInsert(index int, value []byte) {
+	var op exprHandlerOp
+	op.opcode = exprHandlerOpcodeInsert
+	opIndex, opValue := op.PropsForInsert()
+	*opIndex, *opValue = index, value
+
+	handler.addToBatchAndSendIfFull(op)
+}
+
+func (handler *ExprHandler) addToBatchAndSendIfFull(op exprHandlerOp) {
+	handler.batch = append(handler.batch, op)
+
+	if len(handler.batch) >= ExprHandlerBatchSize {
+		b := make([]exprHandlerOp, len(handler.batch))
+		copy(b, handler.batch)
+		handler.sendBatchWork(b)
+		handler.batch = handler.batch[:0]
+	}
+}
+
+func (handler *ExprHandler) sendBatchWork(batch []exprHandlerOp) {
+	if len(batch) == 0 {
+		return
+	}
+	editor.WorkChan() <- exprHandlerBatchWork{handler, batch}
 }
 
 func (handler *ExprHandler) getRuneOffsetCache() *runes.OffsetCache {
@@ -220,16 +250,16 @@ func NewEditableExprExecutor(e *editable, win *Window, dir string, handler *Expr
 	}
 }
 
-func (ex EditableExprExecutor) Do(cmd string) {
+func (ex EditableExprExecutor) Do(cmd string) sync.Future {
 	ok := ex.createInterpreter(cmd)
 	if !ok {
-		return
+		return sync.CompletedFuture
 	}
 
 	ranges := ex.buildInitialRanges()
 	ex.log(cmd, ranges)
 	//ex.runInterpreter(ranges)
-	ex.runInterpreterAsync(ranges)
+	return ex.runInterpreterAsync(ranges)
 }
 
 func (ex *EditableExprExecutor) createInterpreter(cmd string) (ok bool) {
@@ -287,7 +317,7 @@ func (ex *EditableExprExecutor) runInterpreter(initialRanges []expr.Range) {
 	}
 }
 
-func (ex *EditableExprExecutor) runInterpreterAsync(initialRanges []expr.Range) {
+func (ex *EditableExprExecutor) runInterpreterAsync(initialRanges []expr.Range) sync.Future {
 	ex.editable.StartTransaction()
 	ex.editable.writeLock.lock()
 	// The code that saves deletes in OptimizedPieceTable is slow and we don't need
@@ -295,14 +325,23 @@ func (ex *EditableExprExecutor) runInterpreterAsync(initialRanges []expr.Range) 
 	ex.editable.SetSaveDeletes(false)
 
 	finished := make(chan struct{})
-	go ex.win.greyoutIfOpIsTakingTooLong(finished)
+	finishedTee := tee.NewTee[struct{}](2, 0)
+	c := finishedTee.GetOutputChannels()
+
+	future := sync.NewFuture()
+
+	go ex.win.greyoutIfOpIsTakingTooLong(c[0])
+	go func() {
+		<-c[1]
+		future.Done()
+	}()
+
+	finishedTee.Run(context.Background(), finished)
 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				dumpPanic(r)
-				dumpLogs()
-				dumpGoroutines()
+				dumpPanicFiles(r)
 				panic(r)
 			}
 		}()
@@ -311,28 +350,94 @@ func (ex *EditableExprExecutor) runInterpreterAsync(initialRanges []expr.Range) 
 		editor.WorkChan() <- basicWork{func() {
 			ex.editable.writeLock.unlock()
 			ex.editable.SetSaveDeletes(true)
+			ex.editable.EndTransaction()
 		}}
-		ex.editable.EndTransaction()
 		finished <- struct{}{}
 		if err != nil {
 			editor.AppendError(ex.dir, err.Error())
 			return
 		}
 	}()
+
+	return future
 }
 
-type exprHandlerWork struct {
-	editable *editable
-	f        func()
+type exprHandlerBatchWork struct {
+	handler *ExprHandler
+	batch   []exprHandlerOp
 }
 
-func (w exprHandlerWork) Service() (done bool) {
-	w.editable.writeLock.unlock()
-	w.f()
-	w.editable.writeLock.lock()
+func (w exprHandlerBatchWork) Service() (done bool) {
+	w.handler.editable.writeLock.unlock()
+	for _, e := range w.batch {
+		e.Do(w.handler)
+	}
+	w.handler.editable.writeLock.lock()
 	return true
 }
 
-func (w exprHandlerWork) Job() Job {
+func (w exprHandlerBatchWork) Job() Job {
+	return nil
+}
+
+type exprHandlerOp struct {
+	opcode int
+	ints   [2]int
+	bytes  []byte
+}
+
+type exprHandlerOpcode int
+
+const (
+	exprHandlerOpcodeSelectRange = iota
+	exprHandlerOpcodeDelete
+	exprHandlerOpcodeInsert
+)
+
+func (op *exprHandlerOp) PropsForSelect() (rangeStart *int, rangeEnd *int) {
+	return &op.ints[0], &op.ints[1]
+}
+
+func (op *exprHandlerOp) PropsForDelete() (start *int, len *int) {
+	return &op.ints[0], &op.ints[1]
+}
+
+func (op *exprHandlerOp) PropsForInsert() (index *int, value *[]byte) {
+	return &op.ints[0], &op.bytes
+}
+
+func (o *exprHandlerOp) Do(handler *ExprHandler) {
+	switch o.opcode {
+	case exprHandlerOpcodeSelectRange:
+		rangeStart, rangeEnd := o.PropsForSelect()
+		handler.editable.AddSelection(*rangeStart, *rangeEnd)
+	case exprHandlerOpcodeDelete:
+		start, len := o.PropsForDelete()
+		handler.editable.deleteFromPieceTableUndoIndex(*start, *len, handler.cursorIndex)
+	case exprHandlerOpcodeInsert:
+		index, value := o.PropsForInsert()
+		handler.editable.insertToPieceTableUndoIndex(*index, string(*value), handler.cursorIndex)
+		l := utf8.RuneCount(*value)
+		handler.editable.AddSelection(*index, *index+l)
+	}
+}
+
+func (handler *ExprHandler) sendFnWork(f func()) {
+	editor.WorkChan() <- exprHandlerFnWork{handler, f}
+}
+
+type exprHandlerFnWork struct {
+	handler *ExprHandler
+	f       func()
+}
+
+func (w exprHandlerFnWork) Service() (done bool) {
+	w.handler.editable.writeLock.unlock()
+	w.f()
+	w.handler.editable.writeLock.lock()
+	return true
+}
+
+func (w exprHandlerFnWork) Job() Job {
 	return nil
 }

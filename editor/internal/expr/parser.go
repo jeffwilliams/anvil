@@ -2,12 +2,13 @@ package expr
 
 import (
 	"fmt"
-	"github.com/jeffwilliams/anvil/editor/internal/errs"
-	"github.com/jeffwilliams/anvil/editor/internal/escape"
 	"os"
 	"runtime/debug"
 	"strconv"
 	"unicode/utf8"
+
+	"github.com/jeffwilliams/anvil/editor/internal/errs"
+	"github.com/jeffwilliams/anvil/editor/internal/escape"
 )
 
 // Recursive Descent parser

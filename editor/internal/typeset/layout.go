@@ -232,19 +232,29 @@ func (l *layouter) shapeOneRune(r rune) (glyph text.Glyph, err error) {
 
 func shapeOneRune(r rune, fontFace text.FontFace, fontSize int) (glyph text.Glyph, err error) {
 	params := text.Parameters{
-		Font:    fontFace.Font,
-		PxPerEm: fixed.I(fontSize),
+		Font:             fontFace.Font,
+		PxPerEm:          fixed.I(fontSize),
+		DisableSpaceTrim: true,
 	}
 
-	collection := []text.FontFace{fontFace}
-	// TODO: This is slow to figure out the info for one rune. Can we remove it?
-	shaper := text.NewShaper(text.WithCollection(collection))
+	shaper := GetTextShaper(fontFace)
 
 	shaper.LayoutString(params, string(r))
 	glyph, ok := shaper.NextGlyph()
 	if !ok {
 		err = fmt.Errorf("text.Shape.LayoutString returned with ok=false for a single rune")
 	}
+	return
+}
+
+func CalculateRuneSize(r rune, fontFace text.FontFace, fontSize int) (width, height fixed.Int26_6, err error) {
+	g, err := shapeOneRune(r, fontFace, fontSize)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	height = g.Ascent + g.Descent
+	width = g.Advance
 	return
 }
 
@@ -384,8 +394,9 @@ func (l *layouter) beautifyText(text *Text) {
 // However, visually I didn't see any improvement so it's not used for now.
 func (l *layouter) beautifyLine(line *Line) {
 	params := text.Parameters{
-		Font:    l.constraints.FontFace.Font,
-		PxPerEm: fixed.I(l.constraints.FontSize),
+		Font:             l.constraints.FontFace.Font,
+		PxPerEm:          fixed.I(l.constraints.FontSize),
+		DisableSpaceTrim: true,
 	}
 
 	l.shaper.LayoutString(params, string(line.runes))

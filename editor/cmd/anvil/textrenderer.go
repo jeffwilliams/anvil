@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"image"
 
+	"image/color"
+
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -12,7 +14,6 @@ import (
 	"github.com/jeffwilliams/anvil/editor/internal/cache"
 	"github.com/jeffwilliams/anvil/editor/internal/typeset"
 	"golang.org/x/image/math/fixed"
-	"image/color"
 )
 
 /*
@@ -45,7 +46,7 @@ func (t *TextShapers) Get(fontFace text.FontFace) *text.Shaper {
 		return shaper
 	}
 
-	shaper = text.NewShaper(text.WithCollection([]text.FontFace{fontFace}))
+	shaper = text.NewShaper(text.WithCollection([]text.FontFace{fontFace}), text.NoSystemFonts())
 	(*t)[fontFace] = shaper
 	return shaper
 }
@@ -63,7 +64,7 @@ func NewTextRenderer(fontFace text.FontFace, fontSize int, lineSpacing func() in
 
 	//tr.spaceGlyphID, _ = tr.GlyphIDFor(' ')
 	tr.tabStopInterval = 14
-	tr.shaper = text.NewShaper(text.WithCollection([]text.FontFace{fontFace}))
+	tr.shaper = typeset.GetTextShaper(fontFace)
 	return tr
 }
 
@@ -242,7 +243,6 @@ func (l *TextColumnLayouter) calculateItemWidths(items []string) {
 
 		e := l.itemWidthCache.Get(text)
 		if e != nil {
-			log(LogCatgEd, "w=%d\n", e.Val.Floor())
 			l.itemWidths[i] = e.Val
 			continue
 		}

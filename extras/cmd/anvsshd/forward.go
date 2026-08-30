@@ -37,14 +37,14 @@ func listenAndForward(req *ssh.Request, addr string, port uint32, sshConn ssh.Co
 		sendReply(false)
 		return fmt.Errorf("Listening on address %s failed: %v", combined, err)
 	}
-	
+
 	replySent := false
 	if port == 0 && req.WantReply {
 		tcpAddr, ok := listener.Addr().(*net.TCPAddr)
 		if !ok {
 			return fmt.Errorf("Cannot determine the local port we ended up listening on")
 		}
-		
+
 		b := marshalUint32(tcpAddr.Port)
 		replySent = true
 		req.Reply(true, b)

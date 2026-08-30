@@ -24,10 +24,13 @@ const (
 	LogCatgCol        = "Column"
 	LogCatgConf       = "Config"
 	LogCatgEditor     = "Editor"
+	LogCatgLayer      = "Layer"
 	LogCatgPack       = "Packing"
 	LogCatgSsh        = "SSH"
 	LogCatgExpr       = "Expressions"
 	LogCatgFuzzy      = "FuzzySearch"
+	LogCatgTrays      = "Trays"
+	LogCatgPerf       = "Perf"
 )
 
 var debugLogCategories = []string{
@@ -48,6 +51,8 @@ var debugLogCategories = []string{
 	LogCatgSsh,
 	LogCatgExpr,
 	LogCatgFuzzy,
+	LogCatgTrays,
+	LogCatgPerf,
 }
 
 var killPprofDebugServer = make(chan struct{})

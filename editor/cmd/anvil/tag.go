@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"gioui.org/layout"
 )
 
 type Tag struct {
@@ -19,11 +21,17 @@ func (t *Tag) Init(body *Body, style blockStyle, editableStyle editableStyle, ex
 	}
 	t.PreventScrolling = true
 	t.SetAdapter(&editableAdapter{
-		executor:                        executor,
-		owner:                           owner,
-		omitWindowPathWhenResolvingPath: true,
+		executor: executor,
+		owner:    owner,
+		creator:  t,
 	})
 	t.AddTextChangeListener(t.highlightBasenameOnTextChange)
+	t.blockEditable.editable.shouldOmitWinPathWhenAcquiring = t.shouldOmitWinPathWhenAcquiring
+}
+
+func (t *Tag) layout(gtx layout.Context) layout.Dimensions {
+	t.dimensionBehaviours.width = expand
+	return t.blockEditable.layout(gtx)
 }
 
 func (t Tag) Parts() (path, editorArea, userArea string, err error) {
@@ -38,12 +46,14 @@ func (t Tag) Parts() (path, editorArea, userArea string, err error) {
 
 func (t *Tag) Set(path, editorArea, userArea string) {
 
-	savedCursors := t.saveCursorsAndSelections()
+	sc, ss := t.saveCursorsAndSelections()
 
 	pathLen := utf8.RuneCountInString(path)
 	editorAreaLen := utf8.RuneCountInString(editorArea)
 
+	lenBefore := len(t.Bytes())
 	t.SetTextString(fmt.Sprintf("%s%s%s", path, editorArea, userArea))
+	lenAfter := len(t.Bytes())
 
 	t.immutableRange.start = pathLen
 	t.immutableRange.end = editorAreaLen + pathLen
@@ -54,23 +64,51 @@ func (t *Tag) Set(path, editorArea, userArea string) {
 
 	// Setting the text using SetTextString resets the cursor positions,
 	// so we save and restore them
-	t.restoreCursorsAndSelections(savedCursors)
+
+	t.restoreCursors(sc)
+	if lenBefore == lenAfter {
+		t.restoreSelections(ss)
+	}
 }
 
 func (t *Tag) setFgAndBgColors(path string) {
-	if IsErrorsWindow(path) || IsLiveWindow(path) {
-		if t.flash {
-			t.blockEditable.bgcolor = t.blockEditable.style.ErrorFlashBgColor
-			t.blockEditable.editable.style.FgColor = Color(t.blockEditable.style.ErrorFlashFgColor)
-		} else {
-			t.blockEditable.bgcolor = t.blockEditable.style.ErrorBgColor
-			t.blockEditable.editable.style.FgColor = Color(t.blockEditable.style.ErrorFgColor)
-		}
+	defer t.blockEditable.editable.invalidateLayedoutText()
+
+	useErrorWinColors := IsErrorsWindow(path) || IsLiveWindow(path)
+	permittedToUseFlashColors := useErrorWinColors || BasenameLikelyStartsWith(path, '+')
+
+	if permittedToUseFlashColors && t.flash {
+		t.blockEditable.bgcolor = t.blockEditable.style.ErrorFlashBgColor
+		t.blockEditable.editable.style.FgColor = Color(t.blockEditable.style.ErrorFlashFgColor)
+		return
+	}
+
+	if useErrorWinColors {
+		t.blockEditable.bgcolor = t.blockEditable.style.ErrorBgColor
+		t.blockEditable.editable.style.FgColor = Color(t.blockEditable.style.ErrorFgColor)
 	} else {
 		t.blockEditable.bgcolor = t.blockEditable.style.StandardBgColor
 		t.blockEditable.editable.style.FgColor = Color(t.blockEditable.style.StandardFgColor)
 	}
-	t.blockEditable.editable.invalidateLayedoutText()
+}
+
+func BasenameLikelyStartsWith(path string, r rune) bool {
+	// This function doesn't handle the case of filenames on Unix that contain a backslash properly. Hence the "Likely"
+
+	if len(path) == 0 {
+		return false
+	}
+
+	i := strings.LastIndexAny(path, "\\/")
+	if i < 0 {
+		return rune(path[0]) == r
+	}
+
+	if i == len(path)-1 {
+		return false
+	}
+
+	return rune(path[i+1]) == r
 }
 
 func (t *Tag) pathBasenameColor(path string) Color {
@@ -170,8 +208,8 @@ func (t *Tag) highlightBasename(path string) {
 	end := t.immutableRange.start + 1
 	log(LogCatgEd, "Tag.highlightBasename: highlighting basename of path %s, between %d and %d\n", path, start, end)
 
-	color := t.pathBasenameColor(path)
-	t.AddManualHighlight(start, end, color)
+	fgColor := t.pathBasenameColor(path)
+	t.AddManualHighlight(start, end, fgColor, Color{0, 0, 0, 0})
 }
 
 func (t *Tag) highlightBasenameOnTextChange(ch *TextChange) {
@@ -181,4 +219,21 @@ func (t *Tag) highlightBasenameOnTextChange(ch *TextChange) {
 	}
 
 	t.highlightBasename(path)
+}
+
+func (t *Tag) shouldOmitWinPathWhenAcquiring(r *textRange) bool {
+	// Specifically if we are acquiring part of the path of the window then behave specially
+	_, parts, err := t.calcParts()
+	if err != nil {
+		return false
+	}
+
+	p := NewTextRange(parts.path[0], parts.path[1])
+
+	if p.Contains(r) {
+		log(LogCatgEd, "Tag.shouldOmitWinPathWhenAcquiring: The text range for the path of the window contains the text being acquired")
+		return true
+	}
+
+	return false
 }

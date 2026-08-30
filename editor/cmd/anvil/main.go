@@ -5,6 +5,8 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strings"
+	"time"
 
 	"gioui.org/app"
 	"gioui.org/io/event"
@@ -13,7 +15,6 @@ import (
 	"gioui.org/text"
 
 	_ "embed"
-	//"net/http"
 
 	"gioui.org/font"
 	"github.com/jeffwilliams/anvil/editor/internal/ansi"
@@ -29,12 +30,14 @@ const editorName = "anvil"
 var optProfile = pflag.BoolP("profile", "p", false, "Profile the code CPU usage. The profile file location is printed to stdout.")
 var optLoadDumpfile = pflag.StringP("load", "l", "", "Load state from the specified file that was created using Dump")
 var optChdir = pflag.StringP("cd", "d", "", "Change directory to the specified path before starting")
-var optDebugStdout = pflag.BoolP("dbg", "b", false, "Print debug logs to stdout")
+var optDebugStdout = pflag.BoolP("debug-stdout", "b", false, "Print debug logs to stdout")
+var optDebugToWindow = pflag.BoolP("debug-window", "g", false, "Print debug logs to +Errors window")
+var optDebugCategories = pflag.StringP("debug-catg", "c", "", fmt.Sprintf("One or more comma-separated categories to print when -b or -g are used. The supported categories are:\n  %s", strings.Join(debugLogCategories, "\n  ")))
 var optPixelSizeFonts = pflag.BoolP("fonts-in-pixels", "f", false, "Consider font sizes in pixels instead of device independent units")
 var optVersion = pflag.BoolP("version", "", false, "Print version")
 
 func main() {
-	SetDefaultCursorProg()
+	help.addCommandMkdocsHelp()
 	parseAndValidateOptions()
 
 	if *optVersion {
@@ -56,6 +59,7 @@ func main() {
 	printSyntaxLexerParseErrors()
 
 	LoadSettings()
+	InitKeymaps()
 	LoadStyle()
 	HirePlumber()
 	ansi.InitColors(WindowStyle.Ansi.AsColors())
@@ -64,6 +68,7 @@ func main() {
 
 	LoadSshKeys()
 	initDebugging()
+	LoadSyntaxFiles()
 
 	go ServeLocalAPI()
 
@@ -92,7 +97,7 @@ func parseAndValidateOptions() {
 var styleLoadedFromFile bool
 
 func LoadStyle() {
-	style, err := LoadStyleFromConfigFile(&WindowStyle)
+	style, err := LoadStyleFromConfigFile(&DefaultWindowStyle)
 	if err != nil {
 		log(LogCatgApp, "Loading style from config file failed: %v", err)
 		return
@@ -136,6 +141,14 @@ var plumbingLoadedFromFile bool
 
 func HirePlumber() {
 	HirePlumberUsingFile(PlumbingConfigFile())
+}
+
+func InitKeymaps() {
+	err := initKeymaps()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Loading keymaps failed: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func HirePlumberUsingFile(path string) error {
@@ -194,18 +207,16 @@ func ParseDefaultCursorProg() ([]draw.Op, error) {
 	return draw.Parse(DefaultCursorProg)
 }
 
-func SetDefaultCursorProg() {
-	ops, err := ParseDefaultCursorProg()
+func MustParseDefaultCursorProg() []draw.Op {
+	o, err := ParseDefaultCursorProg()
 	if err != nil {
-		fmt.Printf("parsing default cursor program failed: %v\n", err)
-		os.Exit(1)
+		panic(err.Error())
 	}
-	WindowStyle.compiledCursorProg = ops
-	WindowStyle.CursorProg = DefaultCursorProg
+	return o
 }
 
 // https://colorhunt.co/palette/1624471f40681b1b2fe43f5a
-var WindowStyle = Style{
+var DefaultWindowStyle = Style{
 	Fonts: []FontStyle{
 		{
 			FontName: "defaultVariableFont",
@@ -248,6 +259,14 @@ var WindowStyle = Style{
 	TabStopPadding:                  10, // in pixels
 	LineSpacing:                     0,
 	TextLeftPadding:                 3,
+	TextRightPadding:                3,
+	TextBottomPadding:               0,
+	TrayFgColor:                     MustParseHexColor("#f0f0f0"),
+	TrayBgColor:                     MustParseHexColor("#263859"),
+	TrayInnerBorderColor:            MustParseHexColor("#000000"),
+	TrayInnerBorderWidth:            2,
+	TrayOuterBorderColor:            MustParseHexColor("#404040"),
+	TrayOuterBorderWidth:            2,
 	Syntax: SyntaxStyle{
 		// Colors borrowed from vim jellybeans color scheme https://github.com/nanotech/jellybeans.vim/blob/master/colors/jellybeans.vim
 		KeywordColor:      MustParseHexColor("#8fbfdc"), // jellybeans color for PreProc
@@ -284,7 +303,11 @@ var WindowStyle = Style{
 			MustParseHexColor("#ffffff"),
 		},
 	},
+	compiledCursorProg: MustParseDefaultCursorProg(),
+	CursorProg: DefaultCursorProg,
 }
+
+var WindowStyle = DefaultWindowStyle
 
 var (
 	editor      *Editor
@@ -308,8 +331,8 @@ func dumpPanic(i interface{}) {
 	fmt.Fprintf(f, "%s", string(debug.Stack()))
 }
 
-func dumpLogs() {
-	fname := fmt.Sprintf("%s.panic-logs", editorName)
+func dumpLogs(extension string) {
+	fname := fmt.Sprintf("%s.%s", editorName, extension)
 	f, err := os.Create(fname)
 	if err != nil {
 		fmt.Printf("Opening file '%s' failed: %v\n", fname, err)
@@ -320,8 +343,8 @@ func dumpLogs() {
 	fmt.Fprintf(f, debugLog.String())
 }
 
-func dumpGoroutines() {
-	fname := fmt.Sprintf("%s.panic-gortns", editorName)
+func dumpGoroutines(extension string) {
+	fname := fmt.Sprintf("%s.%s", editorName, extension)
 
 	f, err := os.Create(fname)
 	if err != nil {
@@ -335,6 +358,12 @@ func dumpGoroutines() {
 	buf = buf[0:sz]
 
 	fmt.Fprintf(f, string(buf))
+}
+
+func dumpPanicFiles(panic interface{}) {
+	dumpPanic(panic)
+	dumpLogs("panic-logs")
+	dumpGoroutines("panic-gortns")
 }
 
 func initializeEditorToCurrentDirectory() {
@@ -372,9 +401,7 @@ func initializeEditorWithDumpfile(f string) {
 func loop(w *app.Window) {
 	defer func() {
 		if r := recover(); r != nil {
-			dumpPanic(r)
-			dumpLogs()
-			dumpGoroutines()
+			dumpPanicFiles(r)
 			panic(r)
 		}
 	}()
@@ -397,9 +424,7 @@ func loop(w *app.Window) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				dumpPanic(r)
-				dumpLogs()
-				dumpGoroutines()
+				dumpPanicFiles(r)
 				panic(r)
 			}
 		}()
@@ -407,9 +432,12 @@ func loop(w *app.Window) {
 		for {
 			select {
 			case e := <-events:
+				startUIWatchdogTimer()
 				handleEvent(e)
 				acks <- struct{}{}
+				stopUIWatchdogTimer()
 			case w := <-editor.WorkChan():
+				startUIWatchdogTimer()
 				done := w.Service()
 				if done && w.Job() != nil {
 					editor.RemoveJob(w.Job())
@@ -419,6 +447,7 @@ func loop(w *app.Window) {
 				}
 
 				appWindow.Invalidate()
+				stopUIWatchdogTimer()
 			}
 		}
 	}()
@@ -459,6 +488,47 @@ func handleEvent(e event.Event) {
 		log(LogCatgUI, "window config changed: %v\n", e.Config)
 		application.WindowConfigChanged(&e.Config)
 	}
+}
+
+var uiWatchdogTimer *time.Timer
+var uiWatchdogIteration int
+
+func startUIWatchdogTimer() {
+	if !settings.Debug.DumpLogsOnUiFreeze {
+		return
+	}
+
+	uiWatchdogTimer = time.AfterFunc(3*time.Second, dumpFilesOnUIWatchdogTimeout)
+}
+
+func stopUIWatchdogTimer() {
+	if uiWatchdogTimer == nil {
+		return
+	}
+
+	uiWatchdogTimer.Stop()
+}
+
+func dumpFilesOnUIWatchdogTimeout() {
+	if uiWatchdogIteration > 20 {
+		return
+	}
+
+	dumpFilesOnUIWatchdogTimeoutIter(uiWatchdogIteration)
+	uiWatchdogIteration++
+	uiWatchdogTimer = time.AfterFunc(7*time.Second, dumpFilesOnUIWatchdogTimeout)
+}
+
+func dumpFilesOnUIWatchdogTimeoutIter(iteration int) {
+	logsFname := "ui-freeze-logs"
+	goroutinesFname := "ui-freeze-gortns"
+	if iteration > 0 {
+		logsFname = fmt.Sprintf("%s.%d", logsFname, iteration)
+		goroutinesFname = fmt.Sprintf("%s.%d", goroutinesFname, iteration)
+	}
+
+	dumpLogs(logsFname)
+	dumpGoroutines(goroutinesFname)
 }
 
 var editorInitParams = struct {
@@ -557,9 +627,25 @@ type EditorInitializationParams struct {
 	InitialFile  string
 }
 
+var categoriesToStream = make(map[string]struct{})
+var alreadyStreamingThisMessage = false
+
 func log(category, message string, args ...interface{}) {
-	if *optDebugStdout {
+	shouldStream := func() bool {
+		if len(categoriesToStream) == 0 {
+			return true
+		}
+		_, ok := categoriesToStream[category]
+		return ok
+	}
+
+	if *optDebugStdout && shouldStream() {
 		fmt.Printf(message, args...)
+	}
+	if *optDebugToWindow && shouldStream() && !alreadyStreamingThisMessage {
+		alreadyStreamingThisMessage = true
+		editor.Tag.adapter.appendError("", fmt.Sprintf(message, args...))
+		alreadyStreamingThisMessage = false
 	}
 	debugLog.Addf(category, message, args...)
 }
@@ -567,6 +653,13 @@ func log(category, message string, args ...interface{}) {
 func initDebugging() {
 	expr.Debug = func(message string, args ...interface{}) {
 		log(LogCatgExpr, message, args...)
+	}
+
+	if *optDebugCategories != "" {
+		parts := strings.Split(*optDebugCategories, ",")
+		for _, p := range parts {
+			categoriesToStream[strings.TrimSpace(p)] = struct{}{}
+		}
 	}
 }
 
@@ -579,7 +672,7 @@ func executeStartupCommands() {
 				log(LogCatgApp, "executeStartupCommands: adding command '%s' in context of editor for next layout\n", lcmd)
 				editor.Tag.AddOpForNextLayout(func(gtx layout.Context) {
 					log(LogCatgApp, "executeStartupCommands: running command '%s' in context of editor\n", lcmd)
-					editor.Tag.adapter.execute(&editor.Tag.blockEditable.editable, gtx, lcmd, nil)
+					editor.Tag.adapter.execute(&editor.Tag.blockEditable.editable, gtx, lcmd, nil, nil, 0)
 				})
 			}
 

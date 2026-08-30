@@ -2,10 +2,11 @@ package words
 
 import (
 	"bytes"
-	"github.com/armon/go-radix"
-	"github.com/jeffwilliams/anvil/editor/internal/slice"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/armon/go-radix"
+	"github.com/jeffwilliams/anvil/editor/internal/slice"
 )
 
 type Completion struct {

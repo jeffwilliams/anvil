@@ -55,6 +55,7 @@ type WindowDataLoadSender struct {
 	sentType        bool
 	work            chan Work
 	load            *WindowDataLoad
+	Opts            LoadFileOpts
 }
 
 func (w WindowDataLoadSender) workIsDone() bool {
@@ -66,7 +67,7 @@ func (w *WindowDataLoadSender) sendType(t fileType) {
 		return
 	}
 
-	w.work <- &winSetFiletype{job: w.load.GetJob(), win: w.load.Win, fileType: t}
+	w.work <- &winSetFiletype{job: w.load.GetJob(), win: w.load.Win, fileType: t, suffix: w.Opts.Suffix}
 	w.sentType = true
 }
 
@@ -80,7 +81,7 @@ func (w *WindowDataLoadSender) sendContents(x []byte) {
 	w.sendType(typeFile)
 
 	log(LogCatgWin, "pump: got some contents\n")
-	w.work <- &winLoadData{job: w.load.GetJob(), win: w.load.Win, data: x, growBodyBehaviour: w.load.Opts.GrowBodyBehaviour}
+	w.work <- &winLoadData{job: w.load.GetJob(), win: w.load.Win, data: x, Opts: w.load.Opts}
 	if w.load.Opts.Tail {
 		w.work <- &winLoadGoToEnd{job: w.load.GetJob(), win: w.load.Win}
 	}
@@ -132,6 +133,7 @@ func (f *WindowDataLoad) pump(c chan Work) {
 	sender := WindowDataLoadSender{
 		work: c,
 		load: f,
+		Opts: f.Opts,
 	}
 
 FOR:
@@ -181,6 +183,20 @@ const (
 	dontGrowBodyIfTooSmall
 )
 
+type moveLayerBehaviour int
+
+const (
+	moveToCurrentLayer = iota
+	dontMoveToCurrentLayer
+)
+
+type moveWindowBehaviour int
+
+const (
+	moveToCurrentColumn = iota
+	dontMoveToCurrentColumn
+)
+
 func (l *WindowDataLoad) Kill() {
 	select {
 	case l.DataLoad.Kill <- struct{}{}:
@@ -194,10 +210,10 @@ func (l *WindowDataLoad) Name() string {
 
 // WindowDataChunk is a chunk of data to be written to a window, or an error
 type winLoadData struct {
-	job               Job
-	win               WindowHolder
-	data              []byte
-	growBodyBehaviour growBodyBehaviour
+	job  Job
+	win  WindowHolder
+	data []byte
+	Opts LoadFileOpts
 }
 
 type winLoadNames struct {
@@ -228,6 +244,7 @@ type winSetFiletype struct {
 	job      Job
 	win      WindowHolder
 	fileType fileType
+	suffix   []byte
 }
 
 type Work interface {
@@ -244,7 +261,10 @@ func (l winLoadData) Service() (done bool) {
 	}
 
 	win.Append(l.data)
-	if l.growBodyBehaviour == growBodyIfTooSmall {
+
+	editor.EnsureWindowIsVisible(win, l.Opts.MoveLayerBehaviour, l.Opts.MoveNonVisibleWindowBehaviour, l.Opts.InCol)
+
+	if l.Opts.GrowBodyBehaviour == growBodyIfTooSmall {
 		win.showIfHidden()
 		win.GrowIfBodyTooSmall()
 		editor.SetOnlyFlashedWindow(win)
@@ -342,6 +362,7 @@ func (l winSetFiletype) Service() (done bool) {
 
 	if l.fileType == typeDir {
 		win.filler = NewFillEditableWithItemList(&win.Body.layouter, &win.layout.style, []string{})
+		win.filler.setSuffix(l.suffix)
 		win.Body.SetPreDrawHook(win.filler.preDrawHook)
 	} else {
 		win.Body.SetPreDrawHook(nil)

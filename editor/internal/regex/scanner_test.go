@@ -1,8 +1,9 @@
 package regex
 
 import (
-	"github.com/stretchr/testify/assert"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestScanRegex(t *testing.T) {

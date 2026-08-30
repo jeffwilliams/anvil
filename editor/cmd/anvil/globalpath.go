@@ -236,6 +236,18 @@ func (g GlobalPath) MakeAbsoluteRelativeTo(p *GlobalPath) *GlobalPath {
 	}
 }
 
+// Join joins another element to the end of Path
+func (g *GlobalPath) Join(s string) *GlobalPath {
+	join := filepath.Join
+	if g.IsRemote() {
+		join = path.Join
+	}
+
+	c := g.Clone()
+	c.path = join(c.path, s)
+	return c
+}
+
 // Dir returns the directory of the GlobalPath. If `g` is a directory it is returned,
 // otherwise it's parent directory is returned
 func (g GlobalPath) Dir() *GlobalPath {

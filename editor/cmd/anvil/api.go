@@ -16,6 +16,7 @@ import (
 	"sync"
 	"unicode"
 
+	"gioui.org/io/key"
 	"gioui.org/layout"
 	"github.com/gorilla/websocket"
 	"github.com/jszwec/csvutil"
@@ -28,23 +29,31 @@ Summary of operations:
 
 
     GET /wins/: list window ids and paths
-   POST /wins/: create a new window and return the id
+    POST /wins/: create a new window and return the id
     GET /wins/1/body: Get contents of body of window 1
     PUT /wins/1/body: Set contents of body of window 1
     PUT /wins/1/body/insert: Insert text at cursors
-	 POST /wins/1/body: Append to the contents of the body of window 1
+    POST /wins/1/body: Append to the contents of the body of window 1
     GET /wins/1/body/info: Get info about window body (i.e. length)
     PUT /wins/1/body?start=20&end=25: Set part of buffer in [20,25). Not implemented.
     GET /wins/1/body/cursors: Get info about cursors in the window body
     PUT /wins/1/body/cursors: Set position of cursors in the window body
+    POST /wins/1/body/keypress: Simulate a keypress. This is useful for programs that intercept keypresses.
+    GET /wins/1/body/tint: Get info about tinted regions in the window body
+    PUT /wins/1/body/tint: Set tinted regions in the window body
+    POST /wins/1/body/tint: Add a tinted region in the window body
+    DELETE /wins/1/body/tint: Remove all tinted regions in the window body
     GET /wins/1/info: get window information, such as file paths
     GET /wins/1/selections: get window selections
     GET /wins/1/tag: Get tag
     PUT /wins/1/tag: Set tag
+    GET /wins/1/register: List the notifications that the process is registered for for this window
+    POST /wins/1/register: Add a registration to the list of notifications
+    DELETE /wins/1/register/opname: Delete the registration for op from the list of notifications
     GET /jobs: list jobs
     GET /notifs: Get any pending notifications for the current API session. The notifications are then cleared.
-	 POST /cmds: Create a new client-defined command. If it already exists, register interest in it.
-	 POST /execute: Execute a command as if it was clicked. The command is executed as if it was run from the editor tag
+    POST /cmds: Create a new client-defined command. If it already exists, register interest in it.
+    POST /execute: Execute a command as if it was clicked. The command is executed as if it was run from the editor tag
     GET /ws: upgrade the connection to a websocket
     GET /info: return information about Anvil
 
@@ -86,9 +95,7 @@ type ApiHandler struct {
 
 func (a ApiHandler) ServeHTTP(rsp http.ResponseWriter, req *http.Request) {
 	if r := recover(); r != nil {
-		dumpPanic(r)
-		dumpLogs()
-		dumpGoroutines()
+		dumpPanicFiles(r)
 		panic(r)
 	}
 
@@ -113,6 +120,10 @@ func (a ApiHandler) ServeHTTP(rsp http.ResponseWriter, req *http.Request) {
 			fallthrough
 		case "/body/insert":
 			fallthrough
+		case "/body/tint":
+			fallthrough
+		case "/body/keypress":
+			fallthrough
 		case "/body/info":
 			a.serveWindowBody(winId, rsp, req, subpath)
 			return
@@ -124,6 +135,14 @@ func (a ApiHandler) ServeHTTP(rsp http.ResponseWriter, req *http.Request) {
 			return
 		case "/tag":
 			a.serveWindowTag(winId, rsp, req)
+			return
+		case "/register":
+			a.serveWindowRegister(&sess, winId, rsp, req)
+			return
+		}
+
+		if strings.HasPrefix(subpath, "/register") {
+			a.serveWindowRegister(&sess, winId, rsp, req)
 			return
 		}
 	} else if req.URL.Path == "/jobs" {
@@ -336,14 +355,25 @@ type apiWindow struct {
 	Path       string
 }
 
-func (a ApiHandler) buildWindowBody(w *Window) apiWindowBody {
-	return apiWindowBody{
-		Len: w.Body.Len(),
+func (a ApiHandler) buildWindowBody(win *Window) (body apiWindowBody, err error) {
+	var w, h int
+	w, h, err = win.Body.SizeInRunes()
+	if err != nil {
+		return
 	}
+
+	body = apiWindowBody{
+		Len:           win.Body.Len(),
+		WidthInRunes:  w,
+		HeightInRunes: h,
+	}
+	return
 }
 
 type apiWindowBody struct {
-	Len int
+	Len           int
+	WidthInRunes  int
+	HeightInRunes int
 }
 
 func (a ApiHandler) serveWindowBody(winId int, rsp http.ResponseWriter, req *http.Request, subpath string) {
@@ -354,6 +384,10 @@ func (a ApiHandler) serveWindowBody(winId int, rsp http.ResponseWriter, req *htt
 		a.serveWindowBodyCursors(winId, rsp, req)
 	case "/body/insert":
 		a.serveWindowBodyInsert(winId, rsp, req)
+	case "/body/tint":
+		a.serveWindowBodyTint(winId, rsp, req)
+	case "/body/keypress":
+		a.serveWindowBodyKeypress(winId, rsp, req)
 	default:
 		a.serveWindowBodyContent(winId, rsp, req)
 	}
@@ -368,7 +402,12 @@ func (a ApiHandler) serveWindowBodyInfo(winId int, rsp http.ResponseWriter, req 
 		return
 	}
 
-	b := a.buildWindowBody(win)
+	b, err := a.buildWindowBody(win)
+	if err != nil {
+		msg := fmt.Sprintf("Not able to get window body info: %s", err)
+		http.Error(rsp, msg, http.StatusInternalServerError)
+		return
+	}
 
 	contentType, enc, flush := a.getEncoderForHTTPResponse(rsp, req)
 
@@ -449,6 +488,8 @@ func (a ApiHandler) putWindowBodyCursors(winId int, rsp http.ResponseWriter, req
 		return
 	}
 
+	log(LogCatgAPI, "ApiHandler.serveWindowBody: setting cursors for window %d to %v\n", winId, cursors)
+
 	ch := make(chan []int)
 	fn := func() {
 		cursors := <-ch
@@ -509,15 +550,33 @@ func (a ApiHandler) insertWindowBodyContent(winId int, rsp http.ResponseWriter, 
 }
 
 func (a ApiHandler) putWindowBodyContent(winId int, rsp http.ResponseWriter, req *http.Request) {
+
+	setCursorStr := req.URL.Query().Get("setcursor")
+	setCursor := true
+	if setCursorStr != "" {
+		switch setCursorStr {
+		case "true":
+			setCursor = true
+		case "false":
+			setCursor = false
+		default:
+			setCursor = false
+		}
+	}
+
 	a.changeWindowBodyContent(winId, rsp, req, func(win *Window, data []byte) {
+		editor.EnsureWindowIsInCurrentLayer(win)
 		ci := win.Body.blockEditable.firstCursorIndex()
 		tl := win.Body.TopLeftIndex
 		win.Body.SetText(data)
 		// TODO: maybe we can avoid setting the entire tag here because it makes it hard to change the tag when it's being updated
 		win.SetTagFromDisplayPath()
 		win.Body.AddOpForNextLayout(func(gtx layout.Context) {
-			win.Body.moveCursorTo(gtx, seek{seekType: seekToRunePos, runePos: ci}, dontSelectText)
-			win.Body.TopLeftIndex = tl
+			if setCursor {
+				win.Body.moveCursorTo(gtx, seek{seekType: seekToRunePos, runePos: ci}, dontSelectText)
+				win.Body.TopLeftIndex = tl
+			}
+			editor.SetOnlyFlashedWindow(win)
 		})
 	})
 }
@@ -569,8 +628,10 @@ func (a ApiHandler) postWindowBodyContent(winId int, rsp http.ResponseWriter, re
 			return
 		}
 
+		editor.EnsureWindowIsInCurrentLayer(win)
 		win.Body.Append(data)
 		win.SetTagFromDisplayPath()
+		editor.SetOnlyFlashedWindow(win)
 	}
 
 	editor.WorkChan() <- basicWork{fn}
@@ -593,6 +654,209 @@ func (a ApiHandler) serveWindowBodyInsert(winId int, rsp http.ResponseWriter, re
 
 	msg := fmt.Sprintf("Method %s is not supported for %s", req.Method, req.URL.Path)
 	http.Error(rsp, msg, http.StatusBadRequest)
+}
+
+func (a ApiHandler) serveWindowBodyTint(winId int, rsp http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodGet {
+		log(LogCatgAPI, "ApiHandler.serveWindowBodyTint: request to get\n")
+		a.getWindowBodyTint(winId, rsp, req)
+		return
+	} else if req.Method == http.MethodPut {
+		log(LogCatgAPI, "ApiHandler.serveWindowBodyTint: request to put\n")
+		a.putWindowBodyTint(winId, rsp, req)
+		return
+	} else if req.Method == http.MethodPost {
+		log(LogCatgAPI, "ApiHandler.serveWindowBodyTint: request to post\n")
+		a.postWindowBodyTint(winId, rsp, req)
+		return
+	} else if req.Method == http.MethodDelete {
+		log(LogCatgAPI, "ApiHandler.serveWindowBodyTint: request to delete\n")
+		a.deleteWindowBodyTint(winId, rsp, req)
+		return
+	}
+
+	msg := fmt.Sprintf("Method %s is not supported for %s", req.Method, req.URL.Path)
+	http.Error(rsp, msg, http.StatusBadRequest)
+}
+
+func (a ApiHandler) getWindowBodyTint(winId int, rsp http.ResponseWriter, req *http.Request) {
+	win := a.FindWindowForId(winId)
+	if win == nil {
+		msg := fmt.Sprintf("No window with id %d", winId)
+		http.Error(rsp, msg, http.StatusNotFound)
+		return
+	}
+
+	tints := a.buildEditableTints(win)
+
+	contentType, enc, flush := a.getEncoderForHTTPResponse(rsp, req)
+
+	rsp.Header().Add("Content-Type", string(contentType))
+	enc.Encode(tints)
+	flush()
+}
+
+func (a ApiHandler) putWindowBodyTint(winId int, rsp http.ResponseWriter, req *http.Request) {
+	replaceExisting := true
+	a.changeWindowBodyTint(winId, rsp, req, replaceExisting)
+}
+
+func (a ApiHandler) postWindowBodyTint(winId int, rsp http.ResponseWriter, req *http.Request) {
+	replaceExisting := false
+	a.changeWindowBodyTint(winId, rsp, req, replaceExisting)
+}
+
+func (a ApiHandler) changeWindowBodyTint(winId int, rsp http.ResponseWriter, req *http.Request, replaceExisting bool) {
+	var tints apiTints
+
+	_, dec, err := a.getDecoder(rsp, req, "start", "end", "tint")
+
+	if err != nil {
+		msg := fmt.Sprintf("Decoding request body failed with error %v", err)
+		http.Error(rsp, msg, http.StatusBadRequest)
+		return
+	}
+
+	err = dec.Decode(&tints)
+	if err != nil {
+		msg := fmt.Sprintf("Decoding request body failed with error %v", err)
+		http.Error(rsp, msg, http.StatusBadRequest)
+		return
+	}
+
+	// convert tints to syntax intervals
+	intervals := make([]SyntaxInterval, len(tints))
+	for i, t := range tints {
+		fg, bg, err := ParseTint(t.Tint)
+		if err != nil {
+			msg := fmt.Sprintf("Parsing tint color '%s' from the request failed with error %v", t.Tint, err)
+			http.Error(rsp, msg, http.StatusBadRequest)
+			return
+		}
+		intervals[i].start = t.Start
+		intervals[i].end = t.End
+		intervals[i].fgColor = fg
+		intervals[i].bgColor = bg
+	}
+
+	win := a.FindWindowForId(winId)
+
+	if win == nil {
+		msg := fmt.Sprintf("No window with id %d", winId)
+		http.Error(rsp, msg, http.StatusNotFound)
+		return
+	}
+
+	log(LogCatgAPI, "ApiHandler.serveWindowBody: setting tints for window %d to %v\n", winId, intervals)
+
+	ch := make(chan []SyntaxInterval)
+	fn := func() {
+		if replaceExisting {
+			win.Body.ClearManualHighlights()
+		}
+		v := <-ch
+		win.Body.AddManualHighlights(v)
+	}
+
+	editor.WorkChan() <- basicWork{fn}
+	ch <- intervals
+}
+
+func (a ApiHandler) deleteWindowBodyTint(winId int, rsp http.ResponseWriter, req *http.Request) {
+	win := a.FindWindowForId(winId)
+
+	if win == nil {
+		msg := fmt.Sprintf("No window with id %d", winId)
+		http.Error(rsp, msg, http.StatusNotFound)
+		return
+	}
+
+	log(LogCatgAPI, "ApiHandler.serveWindowBody: clearing tints for window %d\n", winId)
+
+	fn := func() {
+		win.Body.ClearManualHighlights()
+	}
+
+	editor.WorkChan() <- basicWork{fn}
+}
+
+func (a ApiHandler) buildEditableTints(win *Window) apiTints {
+	ch := make(chan []*SyntaxInterval)
+
+	fn := func() {
+		ch <- win.Body.ManualHighlights()
+	}
+
+	editor.WorkChan() <- basicWork{fn}
+	highlights := <-ch
+
+	var tints apiTints
+	for _, h := range highlights {
+		tints = append(tints, a.buildEditableTint(h))
+	}
+	return tints
+}
+
+func (a ApiHandler) buildEditableTint(intvl *SyntaxInterval) apiTint {
+	return apiTint{
+		Start: intvl.start,
+		End:   intvl.end,
+		Tint:  intvl.Tint(),
+	}
+}
+
+type apiTints []apiTint
+
+type apiTint struct {
+	Start, End int
+	Tint       string
+}
+
+func (a ApiHandler) serveWindowBodyKeypress(winId int, rsp http.ResponseWriter, req *http.Request) {
+	var keyPress apiKeyPress
+
+	_, dec, err := a.getDecoder(rsp, req, "cursor_index")
+
+	if err != nil {
+		msg := fmt.Sprintf("Decoding request body failed with error %v", err)
+		http.Error(rsp, msg, http.StatusBadRequest)
+		return
+	}
+
+	err = dec.Decode(&keyPress)
+	if err != nil {
+		msg := fmt.Sprintf("Decoding request body failed with error %v", err)
+		http.Error(rsp, msg, http.StatusBadRequest)
+		return
+	}
+
+	win := a.FindWindowForId(winId)
+
+	if win == nil {
+		msg := fmt.Sprintf("No window with id %d", winId)
+		http.Error(rsp, msg, http.StatusNotFound)
+		return
+	}
+
+	ev := &key.Event{
+		Name:      key.Name(keyPress.KeyName),
+		Modifiers: key.Modifiers(keyPress.Modifiers),
+		State:     key.Press,
+	}
+
+	fn := func() {
+		win.Tag.AddOpForNextLayout(func(gtx layout.Context) {
+			win.Tag.invalidateLayedoutText()
+			win.Body.KeyPress(gtx, ev)
+		})
+	}
+
+	editor.WorkChan() <- basicWork{fn}
+}
+
+type apiKeyPress struct {
+	KeyName   string
+	Modifiers int
 }
 
 func (a ApiHandler) serveWindowSelections(winId int, rsp http.ResponseWriter, req *http.Request) {
@@ -729,9 +993,9 @@ func (a ApiHandler) putWindowTag(winId int, rsp http.ResponseWriter, req *http.R
 		win.initialTagUserArea = ""
 		win.customEdCommands = edArea
 		log(LogCatgAPI, "APIHandler: setting window %d tag to '%s'\n", winId, data)
-		saved := win.Tag.saveCursorsAndSelections()
+		sc, ss := win.Tag.saveCursorsAndSelections()
 		win.Tag.SetText(data)
-		win.Tag.restoreCursorsAndSelections(saved)
+		win.Tag.restoreCursorsAndSelections(sc, ss)
 		return
 	}
 
@@ -744,6 +1008,186 @@ func (a ApiHandler) putWindowTag(winId int, rsp http.ResponseWriter, req *http.R
 		return
 	}
 	ch <- data
+}
+
+func (a ApiHandler) serveWindowRegister(sess *ApiSession, winId int, rsp http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodGet {
+		a.getWindowRegistrations(sess, winId, rsp, req)
+		return
+	} else if req.Method == http.MethodPost {
+		a.postWindowRegistration(sess, winId, rsp, req)
+		return
+	} else if req.Method == http.MethodDelete {
+		a.delWindowRegistration(sess, winId, rsp, req)
+		return
+	}
+
+	msg := fmt.Sprintf("Method %s is not supported for %s", req.Method, req.URL.Path)
+	http.Error(rsp, msg, http.StatusBadRequest)
+}
+
+func (a ApiHandler) getWindowRegistrations(sess *ApiSession, winId int, rsp http.ResponseWriter, req *http.Request) {
+	win := a.FindWindowForId(winId)
+
+	if win == nil {
+		msg := fmt.Sprintf("No window with id %d", winId)
+		http.Error(rsp, msg, http.StatusNotFound)
+		return
+	}
+
+	regs := a.buildWinRegs(sess, winId)
+
+	contentType, enc, flush := a.getEncoderForHTTPResponse(rsp, req)
+	rsp.Header().Add("Content-Type", string(contentType))
+	enc.Encode(regs)
+	flush()
+}
+
+func (a ApiHandler) postWindowRegistration(sess *ApiSession, winId int, rsp http.ResponseWriter, req *http.Request) {
+	win := a.FindWindowForId(winId)
+
+	if win == nil {
+		msg := fmt.Sprintf("No window with id %d", winId)
+		http.Error(rsp, msg, http.StatusNotFound)
+		return
+	}
+
+	data, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		msg := fmt.Sprintf("Reading request body failed with error %v", err)
+		http.Error(rsp, msg, http.StatusInternalServerError)
+		return
+	}
+
+	opname := string(data)
+	op := a.parseRegisterableOp(opname)
+	if op < 0 {
+		msg := fmt.Sprintf("Op '%s' is not supported for registration using %s", opname, req.URL.Path)
+		http.Error(rsp, msg, http.StatusBadRequest)
+		return
+	}
+
+	sess.addWindowNotificationRegistration(op, winId)
+
+	if op == ApiNotificationOpKeyPress {
+		f := a.makeKeyPressHook(sess, op, winId)
+		win.Body.keyPressHook = f
+	} else if op == ApiNotificationOpTextInput {
+		f := a.makeTextInputHook(sess, op, winId)
+		win.Body.textInputHook = f
+	}
+}
+
+func (a ApiHandler) parseRegisterableOp(opname string) ApiNotificationOp {
+	var op ApiNotificationOp
+	switch opname {
+	case "insert":
+		op = ApiNotificationOpInsert
+	case "delete":
+		op = ApiNotificationOpDelete
+	case "keyPress":
+		op = ApiNotificationOpKeyPress
+	case "textInput":
+		op = ApiNotificationOpTextInput
+	default:
+		op = -1
+	}
+	return op
+}
+
+func (a ApiHandler) makeKeyPressHook(sess *ApiSession, op ApiNotificationOp, winId int) func(ev *key.Event) {
+	f := func(ev *key.Event) {
+		n := ApiNotification{
+			WinId:  winId,
+			Op:     op,
+			Offset: int(ev.Modifiers),
+			Cmd:    []string{string(ev.Name)},
+		}
+		sess.AddNotification(n)
+	}
+	return f
+}
+
+func (a ApiHandler) makeTextInputHook(sess *ApiSession, op ApiNotificationOp, winId int) func(text string) {
+	f := func(text string) {
+		n := ApiNotification{
+			WinId: winId,
+			Op:    op,
+			Cmd:   []string{text},
+		}
+		sess.AddNotification(n)
+	}
+	return f
+}
+
+func (a ApiHandler) delWindowRegistration(sess *ApiSession, winId int, rsp http.ResponseWriter, req *http.Request) {
+	log(LogCatgAPI, "APIHandler: request to delete registration from window %d\n", winId)
+	win := a.FindWindowForId(winId)
+
+	if win == nil {
+		msg := fmt.Sprintf("No window with id %d", winId)
+		http.Error(rsp, msg, http.StatusNotFound)
+		return
+	}
+
+	// Read the operation name that follows .../register/
+	i := strings.Index(req.URL.Path, "/register/")
+	if i < 0 || i >= len(req.URL.Path)-1 {
+		msg := fmt.Sprintf("Invalid URL path '%s' for deleting registrations", req.URL.Path)
+		http.Error(rsp, msg, http.StatusBadRequest)
+		return
+	}
+
+	opname := req.URL.Path[i+len("/register/"):]
+	op := a.parseRegisterableOp(opname)
+	if op < 0 {
+		msg := fmt.Sprintf("Op '%s' is not supported for unregistration using %s", opname, req.URL.Path)
+		http.Error(rsp, msg, http.StatusBadRequest)
+		return
+	}
+
+	if !sess.windowNotificationRegistered(op, winId) {
+		msg := fmt.Sprintf("You are not registered for %s", op)
+		http.Error(rsp, msg, http.StatusBadRequest)
+		return
+	}
+
+	sess.delWindowNotificationRegistration(op, winId)
+
+	if op == ApiNotificationOpKeyPress {
+		log(LogCatgAPI, "APIHandler: request to delete key press registration from window %d\n", winId)
+		win.Body.keyPressHook = nil
+
+		sessions := getApiSessions()
+		for _, s := range sessions {
+			if s.windowNotificationRegistered(op, winId) {
+				f := a.makeKeyPressHook(s, op, winId)
+				win.Body.keyPressHook = f
+				log(LogCatgAPI, "APIHandler: setting key press registration for window %d to a different handler\n", winId)
+			}
+		}
+	} else if op == ApiNotificationOpTextInput {
+		log(LogCatgAPI, "APIHandler: request to delete text input registration from window %d\n", winId)
+		win.Body.textInputHook = nil
+
+		sessions := getApiSessions()
+		for _, s := range sessions {
+			if s.windowNotificationRegistered(op, winId) {
+				f := a.makeTextInputHook(s, op, winId)
+				win.Body.textInputHook = f
+				log(LogCatgAPI, "APIHandler: setting text input registration for window %d to a different handler\n", winId)
+			}
+		}
+	}
+
+}
+
+func (a ApiHandler) buildWinRegs(sess *ApiSession, winId int) []string {
+	r := make([]string, 0)
+	for k := range sess.windowNotificationRegistrations() {
+		r = append(r, k.op.String())
+	}
+	return r
 }
 
 func (a ApiHandler) serveJobs(rsp http.ResponseWriter, req *http.Request) {
@@ -905,7 +1349,7 @@ func (a ApiHandler) execute(sess *ApiSession, rsp http.ResponseWriter, req *http
 		log(LogCatgAPI, "ApiHandler.execute: adding command '%s %v' in context of window %d for next layout\n", cmd.Cmd, strings.Join(cmd.Args, " "), win.Id)
 		win.Tag.AddOpForNextLayout(func(gtx layout.Context) {
 			log(LogCatgAPI, "ApiHandler.execute: running command '%s %v' in context of window %d\n", cmd.Cmd, strings.Join(cmd.Args, " "), win.Id)
-			win.Tag.adapter.execute(&win.Tag.blockEditable.editable, gtx, cmd.Cmd, cmd.Args)
+			win.Tag.adapter.execute(&win.Tag.blockEditable.editable, gtx, cmd.Cmd, cmd.Args, nil, 0)
 		})
 	}
 
@@ -1093,6 +1537,20 @@ func (s *ApiSessionStore) HandleCommand(winId int, cmd string, args []string) (h
 	return
 }
 
+func (s *ApiSessionStore) CommandIsDefined(cmd string) bool {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	for _, sess := range s.sessions {
+		for _, scmd := range sess.userDefinedCommands {
+			if scmd == cmd {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func newCommandApiNotification(winId int, cmd string, args []string) ApiNotification {
 	c := make([]string, len(args)+1)
 	c[0] = cmd
@@ -1113,11 +1571,17 @@ const (
 )
 
 type ApiSession struct {
-	id                   ApiSessionId
-	pendingNotifications []ApiNotification
-	cmd                  string
-	userDefinedCommands  []string
-	websockCtx           *apiSessionWebsockCtx
+	id                            ApiSessionId
+	pendingNotifications          []ApiNotification
+	cmd                           string
+	userDefinedCommands           []string
+	websockCtx                    *apiSessionWebsockCtx
+	registeredWindowNotifications map[WindowNotificationRegistration]struct{}
+}
+
+type WindowNotificationRegistration struct {
+	op    ApiNotificationOp
+	winId int
 }
 
 func createApiSession(cmd string) (sess *ApiSession, err error) {
@@ -1130,8 +1594,9 @@ func createApiSession(cmd string) (sess *ApiSession, err error) {
 	}
 
 	sess = &ApiSession{
-		id:  ApiSessionId(base64.StdEncoding.EncodeToString(buf)),
-		cmd: cmd,
+		id:                            ApiSessionId(base64.StdEncoding.EncodeToString(buf)),
+		cmd:                           cmd,
+		registeredWindowNotifications: make(map[WindowNotificationRegistration]struct{}),
 	}
 
 	apiSessions.Add(sess)
@@ -1165,6 +1630,10 @@ func apiGetAndClearNotifications(id ApiSessionId) []ApiNotification {
 
 func apiHandleCommand(winId int, cmd string, args []string) (handled bool) {
 	return apiSessions.HandleCommand(winId, cmd, args)
+}
+
+func apiCommandIsDefined(cmd string) bool {
+	return apiSessions.CommandIsDefined(cmd)
 }
 
 func (s *ApiSession) Id() ApiSessionId {
@@ -1230,6 +1699,23 @@ func (a *ApiSession) textBeforeFirstSpace(s string) string {
 	return buf.String()
 }
 
+func (a *ApiSession) addWindowNotificationRegistration(op ApiNotificationOp, winId int) {
+	a.registeredWindowNotifications[WindowNotificationRegistration{op, winId}] = struct{}{}
+}
+
+func (a *ApiSession) delWindowNotificationRegistration(op ApiNotificationOp, winId int) {
+	delete(a.registeredWindowNotifications, WindowNotificationRegistration{op, winId})
+}
+
+func (a *ApiSession) windowNotificationRegistered(op ApiNotificationOp, winId int) bool {
+	_, ok := a.registeredWindowNotifications[WindowNotificationRegistration{op, winId}]
+	return ok
+}
+
+func (a *ApiSession) windowNotificationRegistrations() map[WindowNotificationRegistration]struct{} {
+	return a.registeredWindowNotifications
+}
+
 type apiSessionWebsockCtx struct {
 	websock     *websocket.Conn
 	apiEncoding apiEncoding
@@ -1271,6 +1757,10 @@ const (
 	ApiNotificationOpPut
 	ApiNotificationOpFileClosed
 	ApiNotificationOpFileOpened
+	ApiNotificationOpKeyPress
+	ApiNotificationOpTextInput
+	ApiNotificationOpWinSizeChanged
+	ApiNotificationOpWinClosed
 )
 
 func (o ApiNotificationOp) String() string {
@@ -1287,6 +1777,14 @@ func (o ApiNotificationOp) String() string {
 		return "FileClosed"
 	case ApiNotificationOpFileOpened:
 		return "FileOpened"
+	case ApiNotificationOpKeyPress:
+		return "KeyPress"
+	case ApiNotificationOpTextInput:
+		return "TextInput"
+	case ApiNotificationOpWinSizeChanged:
+		return "WinSizeChanged"
+	case ApiNotificationOpWinClosed:
+		return "WinClosed"
 	default:
 		return "?"
 	}

@@ -149,7 +149,8 @@ line 3`,
 			stage := newAddrStage(addr, tc.dot)
 			dataCopy := make([]byte, len(tc.inputData))
 			copy(dataCopy, []byte(tc.inputData))
-			actual, _ := stage.Execute(&dataCopy, []Range{tc.inputRange})
+			runeOffsetCache := runes.NewOffsetCache(8000)
+			actual, _ := stage.Execute(&dataCopy, &runeOffsetCache, []Range{tc.inputRange})
 
 			msgAndArgs := []interface{}{}
 			if len(actual) > 0 {
@@ -306,7 +307,8 @@ func TestOperation(t *testing.T) {
 
 			dataCopy := make([]byte, len(tc.inputData))
 			copy(dataCopy, []byte(tc.inputData))
-			actual, _ := stage.Execute(&dataCopy, []Range{tc.inputRange})
+			runeOffsetCache := runes.NewOffsetCache(8000)
+			actual, _ := stage.Execute(&dataCopy, &runeOffsetCache, []Range{tc.inputRange})
 
 			msgAndArgs := []interface{}{}
 			if len(actual) > 0 {
@@ -606,7 +608,8 @@ func TestGroups(t *testing.T) {
 
 			dataCopy := make([]byte, len(tc.inputData))
 			copy(dataCopy, []byte(tc.inputData))
-			actual, _ := stage.Execute(&dataCopy, []Range{tc.inputRange})
+			runeOffsetCache := runes.NewOffsetCache(8000)
+			actual, _ := stage.Execute(&dataCopy, &runeOffsetCache, []Range{tc.inputRange})
 
 			msgAndArgs := []interface{}{}
 			if len(actual) > 0 {

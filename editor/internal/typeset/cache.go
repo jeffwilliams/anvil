@@ -50,7 +50,7 @@ func (t *textShaperCache) get(fontFace text.FontFace) *text.Shaper {
 	}
 
 	collection := []text.FontFace{fontFace}
-	shaper = text.NewShaper(text.WithCollection(collection))
+	shaper = text.NewShaper(text.WithCollection(collection), text.NoSystemFonts())
 	(*t)[fontFace] = shaper
 	return shaper
 }

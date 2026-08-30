@@ -22,6 +22,7 @@ func (b *Body) Init(style blockStyle, editableStyle editableStyle, syntaxStyle S
 	b.SetAdapter(&editableAdapter{
 		executor: executor,
 		owner:    owner,
+		creator:  b,
 	})
 }
 
@@ -57,7 +58,8 @@ func (b *Body) DisableSyntax() {
 }
 
 func (b *Body) layout(gtx layout.Context) layout.Dimensions {
-	b.blockEditable.maximize = true
+	b.dimensionBehaviours.width = expand
+	b.dimensionBehaviours.height = expand
 	return b.blockEditable.layout(gtx)
 }
 

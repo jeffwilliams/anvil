@@ -1,6 +1,7 @@
 package typeset
 
 import (
+	"fmt"
 	"math"
 	"unicode/utf8"
 
@@ -112,6 +113,61 @@ func (t Text) IndexOfPixelCoord(pos f32.Point) int {
 	}
 
 	return runeIndex
+}
+
+func (t Text) PixelCoordOfIndex(index int) (pos f32.Point, err error) {
+	if index < 0 {
+		err = fmt.Errorf("rune index %d is negative", index)
+		return
+	}
+
+	remain := index
+
+	var line Line
+	lineIndex := 0
+	for {
+		if remain == 0 {
+			return
+		}
+
+		if lineIndex >= len(t.lines) {
+			err = fmt.Errorf("rune index %d is past the number of lines %d in the text. Remaining runes: %d", index, len(t.lines), remain)
+			return
+		}
+
+		if remain < t.lines[lineIndex].RuneCount() {
+			line = t.lines[lineIndex]
+			break
+		}
+		remain -= t.lines[lineIndex].RuneCount()
+		pos.Y += t.lineHeightAsFloat()
+		if remain < 0 {
+			err = fmt.Errorf("internal error: remaining runes is both < %d and >= to it", t.lines[lineIndex].RuneCount())
+			return
+		}
+
+		lineIndex++
+	}
+
+	var xoffset fixed.Int26_6
+	for _, glyph := range line.glyphs {
+		if remain == 0 {
+			break
+		}
+
+		remain--
+		xoffset += glyph.Advance
+	}
+
+	if remain == 0 {
+		// This block also handles a click right after the last glyph
+		pos.X = float32(xoffset.Floor())
+		return
+	}
+
+	err = fmt.Errorf("internal error: walking the line to find the rune at the index resulted in %d remaining runes", remain)
+
+	return
 }
 
 type Line struct {

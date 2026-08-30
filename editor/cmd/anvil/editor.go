@@ -6,30 +6,33 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"math"
 	"sort"
 	"strings"
 	"unicode/utf8"
 
-	"gioui.org/f32"
 	"gioui.org/io/clipboard"
+	"gioui.org/io/event"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/op/clip"
 	"gioui.org/op/paint"
+	"github.com/jeffwilliams/anvil/editor/internal/runes"
 	"github.com/jeffwilliams/anvil/editor/internal/slice"
 	"github.com/jeffwilliams/anvil/editor/internal/words"
 )
 
 type Editor struct {
 	Tag                                    Tag
-	Cols                                   []*Col
+	Layers                                 []*Layer
+	activeLayerIndex                       int
 	layout                                 editorLayouter
 	hspace                                 float32
 	hspaceLastLayout                       float32
-	unpositioned, remove                   []*Col
 	lastSelection                          globalSelection
 	focusedEditable                        *editable
 	focusedWindow                          *Window
+	focusedFloat                           *Float
 	jobs                                   []Job
 	work                                   chan Work
 	recentFiles                            *LRUCache
@@ -38,9 +41,12 @@ type Editor struct {
 	opsForNextLayout                       OpsForNextLayout
 	redrawRequired                         bool
 	editableWhereTertiaryButtonHoldStarted *editable
-	showBasenamesOnlyInTags                bool
 	insertWhenTabPressed                   string
 	lastSelectionsWrittenToClipboard       []string
+	// keyHandlingCoordination coordinates handlers. See the comment
+	// at the top of Editable.InsertTextAndHandleKeys for more info
+	floats                 []*Float
+	doPrintMouseMoveEvents bool
 }
 
 type Job interface {
@@ -74,86 +80,293 @@ func NewEditor(style Style) *Editor {
 	e.Tag.label = "editor"
 	e.setInitialTag()
 	e.completer = words.NewCompleter()
+
 	return e
 }
 
-func (e *Editor) NewCol() *Col {
-	col := e.newCol()
+func (e *Editor) NewLayer() *Layer {
+	layer := NewLayer(e.layout.style)
+	layer.Scheduler = e.Tag.Scheduler
+	layer.workChan = e.work
+	return layer
+}
 
-	if len(e.Cols) == 0 {
-		col.LeftX = 0
-		e.Cols = append(e.Cols, col)
-	} else {
-		e.unpositioned = append(e.unpositioned, col)
+func (e *Editor) activeLayer() *Layer {
+	if len(e.Layers) == 0 {
+		log(LogCatgEditor, "Editor.activeLayer: no layer is active\n")
+		return nil
 	}
 
-	return col
+	return e.Layers[e.activeLayerIndex]
+}
+
+func (e *Editor) Clear() {
+	e.Layers = nil
+}
+
+func (e *Editor) NewCol() *Col {
+	l := e.activeLayer()
+	if l == nil {
+		l = e.AddLayer()
+	}
+
+	return l.NewCol()
+}
+
+func (e *Editor) AddLayer() *Layer {
+	l := e.NewLayer()
+	e.Layers = append(e.Layers, l)
+	return l
+}
+
+func (e *Editor) ActivateLayerRelativeToCurrent(delta int) {
+	e.ActivateLayer(e.activeLayerIndex + delta)
+}
+
+func (e *Editor) ActivateLayer(index int) {
+	oldIndex := e.activeLayerIndex
+	e.activeLayerIndex = index
+	e.clampLayerIndex()
+
+	if oldIndex == e.activeLayerIndex {
+		return
+	}
+
+	e.ReplaceLayerNameInTag()
+
+	e.Tag.AddOpForNextLayout(func(gtx layout.Context) {
+		e.Tag.SetFocus(gtx)
+	})
+}
+
+// ReplaceLayerNameInTag looks for the Lyrname command in the editor tag
+// and tries to update its arguments to be the name of the current layer, if
+// applicable.
+func (e *Editor) ReplaceLayerNameInTag() {
+	log(LogCatgEditor, "ReplaceLayerNameInTag: called\n")
+	if len(e.Layers) == 0 || e.activeLayerIndex < 0 || e.activeLayerIndex >= len(e.Layers) {
+		log(LogCatgEditor, "ReplaceLayerNameInTag: layers are messed up\n")
+		return
+	}
+
+	activeLayer := e.activeLayer()
+	if activeLayer == nil {
+		log(LogCatgEditor, "no active layer\n")
+		return
+	}
+
+	tag := e.Tag.Bytes()
+	tagStr := string(tag)
+
+	cmdNameStart := strings.Index(tagStr, "Lyrname ")
+	if cmdNameStart < 0 {
+		log(LogCatgEditor, "ReplaceLayerNameInTag: Can't find 'Lyrname '\n")
+		return
+	}
+
+	cmdArgStart := cmdNameStart + len("Lyrname ")
+
+	newTag, succeeded := e.replaceLayerNameInTagLozengeDelimited(tag, tagStr, cmdNameStart, cmdArgStart, activeLayer.Name)
+
+	if !succeeded {
+		newTag, succeeded = e.replaceLayerNameInTagNonLozengeDelimited(tag, tagStr, cmdNameStart, cmdArgStart, activeLayer.Name)
+	}
+
+	if !succeeded {
+		return
+	}
+
+	e.Tag.SetTextStringNoReset(newTag)
+}
+
+func (e *Editor) replaceLayerNameInTagLozengeDelimited(tag []byte, tagStr string, cmdNameStart, cmdArgStart int, activeLayerName string) (newTag string, succeeded bool) {
+	if cmdNameStart == 0 {
+		log(LogCatgEditor, "ReplaceLayerNameInTag.replaceLayerNameInTagLozengeDelimited: cmdNameStart is 0\n")
+		return
+	}
+
+	walker := runes.NewWalker(tag)
+	walker.SetBytePos(cmdNameStart)
+
+	walker.Backward(1)
+	if walker.Rune() != '◊' {
+		log(LogCatgEditor, "ReplaceLayerNameInTag.replaceLayerNameInTagLozengeDelimited: previous rune is not ◊\n")
+		return
+	}
+
+	var cmdEnd int
+	for walker.Forward(1); !walker.AtEnd(); walker.Forward(1) {
+		if walker.Rune() == '◊' {
+			cmdEnd = walker.BytePos()
+		}
+	}
+
+	if cmdEnd == 0 {
+		log(LogCatgEditor, "ReplaceLayerNameInTag.replaceLayerNameInTagLozengeDelimited: no end\n")
+		return
+	}
+
+	newTag = tagStr[0:cmdArgStart] + activeLayerName + tagStr[cmdEnd:]
+	succeeded = true
+	return
+}
+
+func (e *Editor) replaceLayerNameInTagNonLozengeDelimited(tag []byte, tagStr string, cmdNameStart, cmdArgStart int, activeLayerName string) (newTag string, succeeded bool) {
+
+	if activeLayerName == "" {
+		return
+	}
+
+	toReplace := ""
+	for i, l := range e.Layers {
+		if i == e.activeLayerIndex {
+			log(LogCatgEditor, "ReplaceLayerNameInTag.replaceLayerNameInTagNonLozengeDelimited: skip active layer\n")
+			continue
+		}
+
+		if l.Name == "" {
+			log(LogCatgEditor, "ReplaceLayerNameInTag.replaceLayerNameInTagNonLozengeDelimited: skip unnamed layer\n")
+			continue
+		}
+
+		if strings.HasPrefix(tagStr[cmdArgStart:], l.Name) {
+			toReplace = l.Name
+			break
+		}
+	}
+
+	if toReplace == "" {
+		return
+	}
+
+	newTag = tagStr[0:cmdArgStart] + activeLayerName + tagStr[cmdArgStart+len(toReplace):]
+	succeeded = true
+	return
+}
+
+func (e *Editor) ActivateHighestLayer() {
+	e.ActivateLayer(len(e.Layers) - 1)
+}
+
+func (e *Editor) clampLayerIndex() {
+	e.activeLayerIndex = e.clampedLayerIndex(e.activeLayerIndex)
+}
+
+func (e *Editor) clampedLayerIndex(index int) int {
+	if index >= len(e.Layers) {
+		index = len(e.Layers) - 1
+	}
+	if index < 0 {
+		index = 0
+	}
+	return index
+}
+
+func (e *Editor) DelActiveLayer() {
+	if len(e.Layers) <= 1 {
+		return
+	}
+
+	for i := e.activeLayerIndex; i < len(e.Layers)-1; i++ {
+		e.Layers[i] = e.Layers[i+1]
+	}
+	e.Layers = e.Layers[:len(e.Layers)-1]
+	e.clampLayerIndex()
+	e.ReplaceLayerNameInTag()
+}
+
+func (e *Editor) MoveColToLayerRelativeToCurrent(col *Col, delta int) {
+	activeLayer := e.activeLayer()
+	if activeLayer == nil {
+		log(LogCatgEditor, "No active layer\n")
+		return
+	}
+
+	i := e.clampedLayerIndex(e.activeLayerIndex + delta)
+	newLayer := e.Layers[i]
+	if newLayer == col.layer && col.Visible() {
+		return
+	}
+
+	colIndex := 0
+	for i, c := range col.layer.Cols {
+		if c == col {
+			colIndex = i
+			break
+		}
+	}
+
+	match := func(i int) bool {
+		return col.layer.Cols[i] == col
+	}
+	col.layer.Cols = slice.RemoveFirstMatchFromSlicePreserveOrder(col.layer.Cols, match).([]*Col)
+	col.layer = newLayer
+	newLayer.AddCol(col)
+
+	if newLayer == col.layer && colIndex < col.layer.leftVisibleCol && col.layer.leftVisibleCol > 0 {
+		col.layer.leftVisibleCol--
+	}
+}
+
+func (e *Editor) SetActiveLayerName(name string) {
+	activeLayer := e.activeLayer()
+	if activeLayer == nil {
+		return
+	}
+	activeLayer.Name = name
+}
+
+func (e *Editor) MoveActiveLayerTo(index int) {
+	if len(e.Layers) <= 1 || index == e.activeLayerIndex {
+		return
+	}
+
+	if index < 0 {
+		index = 0
+	}
+
+	if index >= len(e.Layers) {
+		index = len(e.Layers) - 1
+	}
+
+	if index < e.activeLayerIndex {
+		l := e.Layers[e.activeLayerIndex]
+		for i := index; i <= e.activeLayerIndex; i++ {
+			tmp := e.Layers[i]
+			e.Layers[i] = l
+			l = tmp
+		}
+		e.activeLayerIndex = index
+		return
+	}
+
+	l := e.Layers[e.activeLayerIndex]
+	for i := e.activeLayerIndex; i < index; i++ {
+		e.Layers[i] = e.Layers[i+1]
+	}
+	e.Layers[index] = l
+	e.activeLayerIndex = index
+	return
 }
 
 // NewColDontPosition creates a new column like NewCol, but the caller is expected
 // to manually position it.
 func (e *Editor) NewColDontPosition() *Col {
-	col := e.newCol()
-	e.Cols = append(e.Cols, col)
-	return col
-}
-
-func (e *Editor) newCol() *Col {
-	col := NewCol(e.layout.style)
-	col.ed = e
-	col.Scheduler = NewScheduler(e.WorkChan())
-	col.workChan = e.WorkChan()
-	return col
-}
-
-func (e *Editor) removeColumn(col *Col) {
-	col.Clear()
-
-	match := func(i int) bool {
-		log(LogCatgEditor, "Editor.Delcol: compare %p to needle %p\n", e.Cols[i], col)
-		return e.Cols[i] == col
-	}
-	e.Cols = slice.RemoveFirstMatchFromSlicePreserveOrder(e.Cols, match).([]*Col)
-}
-
-func (e *Editor) RepositionCol(col *Col) {
-	match := func(i int) bool {
-		return e.Cols[i] == col
+	l := e.activeLayer()
+	if l == nil {
+		return nil
 	}
 
-	e.Cols = slice.RemoveFirstMatchFromSlicePreserveOrder(e.Cols, match).([]*Col)
-	e.unpositioned = append(e.unpositioned, col)
-}
-
-func (e *Editor) Clear() {
-	e.Cols = nil
+	return l.NewColDontPosition()
 }
 
 func (e *Editor) NewWindow(col *Col) *Window {
-	if len(e.Cols) == 0 {
+	l := e.activeLayer()
+	if l == nil {
 		return nil
 	}
 
-	log(LogCatgEditor, "Editor.NewWindow: col is %p\n", col)
-	if col != nil {
-		return col.NewWindow()
-	}
-
-	cols := e.VisibleCols()
-	if len(cols) == 0 {
-		return nil
-	}
-	leastPopulated := cols[0]
-	count := math.MaxInt
-	for _, c := range cols {
-		if len(c.Windows) < count {
-			leastPopulated = c
-			count = len(c.Windows)
-		}
-	}
-
-	w := leastPopulated.NewWindow()
-	return w
+	return l.NewWindow(col)
 }
 
 func (e *Editor) AppendError(dir string, msg string) {
@@ -170,6 +383,8 @@ func (e *Editor) AppendError(dir string, msg string) {
 	w := e.FindOrCreateWindow(fname)
 
 	if w != nil {
+		e.EnsureWindowIsInCurrentLayer(w)
+		e.EnsureWindowIsInVisibleColumn(w)
 		w.Append([]byte(msg))
 		w.GrowIfBodyTooSmall()
 		w.Body.AddOpForNextLayout(func(gtx layout.Context) {
@@ -179,6 +394,95 @@ func (e *Editor) AppendError(dir string, msg string) {
 			e.SetOnlyFlashedWindow(w)
 		})
 	}
+}
+
+func (e *Editor) EnsureWindowIsInCurrentLayer(w *Window) {
+	if w.pinnedToCurrentLayer {
+		return
+	}
+
+	if len(e.Layers) <= 1 {
+		return
+	}
+
+	activeLayer := e.activeLayer()
+	if activeLayer == nil {
+		return
+	}
+
+	if len(activeLayer.Cols) == 0 {
+		return
+	}
+
+	if w.col.layer == activeLayer {
+		return
+	}
+
+	from := w.col
+	to := e.focusedColumn()
+	if to == nil {
+		to = activeLayer.Cols[0]
+	}
+	if from == to {
+		return
+	}
+
+	//from.markForRemoval(w)
+	from.removeWindow(w)
+	to.AddWindow(w)
+	to.adjustWindowPathsWhenMovedBetweenCols(w, from, to)
+}
+
+func (e *Editor) EnsureWindowIsInColumn(w *Window, col *Col) {
+	if col == nil {
+		return
+	}
+
+	if w.pinnedToCurrentLayer {
+		return
+	}
+
+	e.EnsureWindowIsInCurrentLayer(w)
+
+	activeLayer := e.activeLayer()
+	if activeLayer == nil {
+		return
+	}
+
+	if len(activeLayer.Cols) == 0 {
+		return
+	}
+
+	from := w.col
+	to := col
+	if from == to {
+		return
+	}
+
+	from.removeWindow(w)
+	to.AddWindow(w)
+	to.adjustWindowPathsWhenMovedBetweenCols(w, from, to)
+}
+
+func (e *Editor) EnsureWindowIsInVisibleColumn(w *Window) {
+	if w.pinnedToCurrentLayer {
+		return
+	}
+
+	if w.col == nil {
+		return
+	}
+
+	if w.col.Visible() {
+		return
+	}
+
+	from := w.col
+
+	to := w.col.layer.bestColumnForNewWindow(nil)
+	from.removeWindow(w)
+	to.AddWindow(w)
+	to.adjustWindowPathsWhenMovedBetweenCols(w, from, to)
 }
 
 func (e *Editor) ClearErrors(dir string) {
@@ -199,7 +503,7 @@ func (e *Editor) ErrorsFileNameOf(dir string) string {
 
 func (e *Editor) FindOrCreateWindow(fname string) *Window {
 	log(LogCatgEditor, "FindOrCreateWindow: Looking for window '%s'\n", fname)
-	w := e.FindWindowForFileAndDisplay(fname)
+	w, _ := e.FindWindowForFile(fname)
 	if w != nil {
 		return w
 	}
@@ -241,11 +545,14 @@ func (e *Editor) focusedColumn() *Col {
 }
 
 type LoadFileOpts struct {
-	GoTo              seek
-	SelectBehaviour   selectBehaviour
-	InCol             *Col
-	GrowBodyBehaviour growBodyBehaviour
-	Tail              bool
+	GoTo                          seek
+	SelectBehaviour               selectBehaviour
+	InCol                         *Col
+	GrowBodyBehaviour             growBodyBehaviour
+	MoveLayerBehaviour            moveLayerBehaviour
+	MoveNonVisibleWindowBehaviour moveWindowBehaviour
+	Tail                          bool
+	Suffix                        []byte
 }
 
 func (e *Editor) LoadFile(displayPath, loadPath *GlobalPath) *Window {
@@ -253,9 +560,10 @@ func (e *Editor) LoadFile(displayPath, loadPath *GlobalPath) *Window {
 }
 
 func (e *Editor) LoadFileOpts(displayPath, loadPath *GlobalPath, opts LoadFileOpts) *Window {
-	w := e.FindWindowForFileAndDisplay(loadPath.String())
+	w, _  := e.FindWindowForFile(loadPath.String())
 	if w != nil {
-		w.showIfHidden()
+
+		e.EnsureWindowIsVisible(w, opts.MoveLayerBehaviour, opts.MoveNonVisibleWindowBehaviour, opts.InCol)
 
 		w.GrowIfBodyTooSmall()
 		// TODO: Warp pointer to here
@@ -283,28 +591,54 @@ func (e *Editor) LoadFileOpts(displayPath, loadPath *GlobalPath, opts LoadFileOp
 	return w
 }
 
-func (e *Editor) FindWindowForFileAndDisplay(path string) *Window {
-	win, _ := e.FindWindowForFile(path)
+func (e *Editor) EnsureWindowIsVisible(win *Window, moveLayerBehaviour moveLayerBehaviour, moveWindowBehaviour moveWindowBehaviour, targetCol *Col) {
 
-	if win != nil && win.col != nil {
-		win.col.SetVisible(true)
+	win.showIfHidden()
+	if moveLayerBehaviour == moveToCurrentLayer {
+		if win.IsPinnedToCurrentLayer() {
+			if i := editor.LayerIndexOfWin(win); i > 0 {
+				editor.ActivateLayer(i)
+			}
+		} else {
+			editor.EnsureWindowIsInCurrentLayer(win)
+		}
 	}
 
-	return win
+	if moveWindowBehaviour == moveToCurrentColumn {
+		if win.IsPinnedToCurrentLayer() {
+			// Scroll to that column
+			if win.col != nil {
+				editor.ScrollColsInActiveLayerUntilColVisible(win.col)
+			}
+		} else {
+			editor.EnsureWindowIsInCurrentLayer(win)
+			if win.col != nil && !win.col.Visible() {
+				if targetCol != nil && targetCol.Visible() {
+					editor.EnsureWindowIsInColumn(win, targetCol)
+				} else {
+					editor.EnsureWindowIsInVisibleColumn(win)
+				}
+			}
+		}
+	}
+
+	win.GrowIfBodyTooSmall()
 }
 
 func (e *Editor) FindWindowForFile(path string) (win *Window, count int) {
-	for _, c := range e.Cols {
-		for _, w := range c.Windows {
-			if e.windowFilesAreSame(w.loadPath.String(), path) {
-				win = w
-				count++
+	for _, l := range e.Layers {
+		for _, c := range l.Cols {
+			for _, w := range c.Windows {
+				if e.windowFilesAreSame(w.loadPath.String(), path) {
+					win = w
+					count++
+				}
 			}
-		}
-		for _, w := range c.unpositioned {
-			if e.windowFilesAreSame(w.loadPath.String(), path) {
-				win = w
-				count++
+			for _, w := range c.unpositioned {
+				if e.windowFilesAreSame(w.loadPath.String(), path) {
+					win = w
+					count++
+				}
 			}
 		}
 	}
@@ -315,6 +649,8 @@ func (e *Editor) DelWindow(w *Window) {
 	if w.col == nil {
 		return
 	}
+
+	e.notifyWindowClosed(w)
 
 	_, count := e.FindWindowForFile(w.loadPath.String())
 	if count == 1 {
@@ -332,6 +668,15 @@ func (e *Editor) notifyFileClosed(w *Window) {
 	n := ApiNotification{
 		WinId: w.Id,
 		Op:    ApiNotificationOpFileClosed,
+	}
+
+	addApiNotificationToAllSessions(n)
+}
+
+func (e *Editor) notifyWindowClosed(w *Window) {
+	n := ApiNotification{
+		WinId: w.Id,
+		Op:    ApiNotificationOpWinClosed,
 	}
 
 	addApiNotificationToAllSessions(n)
@@ -359,24 +704,28 @@ func (e *Editor) windowFilesAreSame(a, b string) bool {
 
 func (e *Editor) Windows() []*Window {
 	r := []*Window{}
-	for _, c := range e.Cols {
-		for _, w := range c.Windows {
-			r = append(r, w)
+	for _, l := range e.Layers {
+		for _, c := range l.Cols {
+			for _, w := range c.Windows {
+				r = append(r, w)
+			}
 		}
 	}
 	return r
 }
 
 func (e *Editor) FindWindowForId(id int) *Window {
-	for _, c := range e.Cols {
-		for _, w := range c.Windows {
-			if w.Id == id {
-				return w
+	for _, l := range e.Layers {
+		for _, c := range l.Cols {
+			for _, w := range c.Windows {
+				if w.Id == id {
+					return w
+				}
 			}
-		}
-		for _, w := range c.unpositioned {
-			if w.Id == id {
-				return w
+			for _, w := range c.unpositioned {
+				if w.Id == id {
+					return w
+				}
 			}
 		}
 	}
@@ -396,10 +745,16 @@ func (e *Editor) Layout(gtx layout.Context) {
 	e.hspaceLastLayout = e.hspace
 	e.hspace = float32(gtx.Constraints.Max.X)
 
-	e.positionCols()
+	if e.doPrintMouseMoveEvents {
+		defer e.printMouseMoveEvents(gtx).Pop()
+	}
+
+	l := e.activeLayer()
+	if l == nil {
+		return
+	}
 
 	e.layout.layout(gtx)
-	e.removeColsMarkedForRemoval()
 	e.opsForNextLayout.Perform(gtx)
 
 	if e.redrawRequired {
@@ -407,29 +762,36 @@ func (e *Editor) Layout(gtx layout.Context) {
 	}
 }
 
+func (e *Editor) printMouseMoveEvents(gtx layout.Context) clip.Stack {
+	pf := pointer.Filter{
+		Target: e,
+		Kinds:  pointer.Move,
+	}
+
+	for {
+		ev, ok := gtx.Event(pf)
+		if !ok {
+			break
+		}
+
+		fmt.Printf("editor: move event: %v\n", ev)
+	}
+
+	r := image.Rectangle{Max: gtx.Constraints.Max}
+	stack := clip.Rect(r).Push(gtx.Ops)
+
+	event.Op(gtx.Ops, e)
+	return stack
+}
+
 func (e *Editor) SignalRedrawRequired() {
 	e.redrawRequired = true
 }
 
-func (e *Editor) setConstraintsToColWidth(gtx *layout.Context, colIndex int) {
-	sz := e.colWidth(colIndex)
-
-	gtx.Constraints.Max.X = int(sz)
-}
-
-func (e *Editor) colWidth(colIndex int) float32 {
-	cols := e.VisibleCols()
-	ps := e.asPackables(cols)
-	p := NewPacker(0, e.hspace, ps)
-	sz := p.ItemSize(colIndex)
-
-	return sz
-}
-
 func (l *editorLayouter) layout(gtx layout.Context) {
 	l.gtx = gtx
-
-	l.fillBackground(gtx)
+	gtx.Values = make(map[string]any)
+	gtx.Values["offset"] = &OffsetStack{}
 
 	// Already saves stack state
 	tagDims := l.ed.Tag.layout(gtx)
@@ -438,13 +800,23 @@ func (l *editorLayouter) layout(gtx layout.Context) {
 	l.drawBottomBorder(gtx)
 	st2 := l.offset(0, gtx.Metric.Dp(l.style.WinBorderWidth))
 
-	l.gtx.Constraints.Max.Y -= tagDims.Size.Y
+	gtx.Constraints.Max.Y -= tagDims.Size.Y + gtx.Metric.Dp(l.style.WinBorderWidth)
+	gtx.Values["offset"].(*OffsetStack).PushWithPurpose(image.Pt(0, tagDims.Size.Y+gtx.Metric.Dp(l.style.WinBorderWidth)), "editor tag and border width")
 
-	// Already saves stack state
-	l.layoutCols()
+	layer := l.ed.activeLayer()
+	if layer == nil {
+		return
+	}
+
+	layer.Layout(gtx)
 
 	st2.Pop()
 	st.Pop()
+	gtx.Values["offset"].(*OffsetStack).Pop()
+
+	for _, f := range l.ed.floats {
+		f.draw(gtx)
+	}
 
 	l.gtx = layout.Context{}
 }
@@ -461,194 +833,12 @@ func (l *editorLayouter) offset(x, y int) op.TransformStack {
 	return op.Offset(image.Point{x, y}).Push(l.gtx.Ops)
 }
 
-func (l *editorLayouter) layoutCols() {
-
-	processEvents := func() (retry bool) {
-		lastColX := -10000
-		cols := l.ed.VisibleCols()
-		for i, c := range cols {
-			if c.LeftX < lastColX {
-				log(LogCatgEditor, "The cols are not sorted in ascending X coordinate")
-				retry = true
-				return
-			}
-
-			lastColX = c.LeftX
-			l.ed.setConstraintsToColWidth(&l.gtx, i)
-			c.HandleEvents(l.gtx)
-		}
-		return
-	}
-
-	success := false
-	for i := 0; i < 3; i++ {
-		retry := processEvents()
-		// Processing events might re-arrange the columns. In that case
-		// try the layout again from the start.
-		if !retry {
-			success = true
-			break
-		}
-	}
-
-	if !success {
-
-		cols := l.ed.VisibleCols()
-		for i, c := range cols {
-			log(LogCatgEditor, "col %d: left is %d", i, c.LeftX)
-		}
-
-		panic("The cols are not sorted in ascending X coordinate")
-	}
-
-	cols := l.ed.VisibleCols()
-
-	// The event handling may have
-	// changed the position of one of the columns, so we need to
-	// first process those events, and then only later
-	// draw the columns. We can't "layout" (handle events and draw) each column
-	// in order because we could draw some of the columns then a later one changes
-	// position and affects the width of the previously drawn columns.
-	for i, c := range cols {
-		l.ed.setConstraintsToColWidth(&l.gtx, i)
-		c.DrawAndListenForEvents(l.gtx)
-	}
-
-}
-
 func (e *editorLayouter) drawBottomBorder(gtx layout.Context) {
 	paint.ColorOp{Color: color.NRGBA(e.style.WinBorderColor)}.Add(gtx.Ops)
 	w := float32(gtx.Metric.Dp(e.style.WinBorderWidth))
 	st := drawFilledBox(gtx, float32(gtx.Constraints.Max.X), w)
 	paint.PaintOp{}.Add(gtx.Ops)
 	st.Pop()
-}
-
-func (e *Editor) positionCols() {
-	e.packNewCols()
-	e.spaceColsEvenlyIfWidthChanged()
-}
-
-func (e *Editor) packNewCols() {
-	if len(e.unpositioned) == 0 {
-		return
-	}
-
-	log(LogCatgEditor, "editor: Positioning columns\n")
-
-	ps := e.asPackables(e.Cols)
-	unp := e.asPackables(e.unpositioned)
-
-	p := NewPacker(0, e.hspace, ps)
-	ps = p.Pack(unp)
-
-	e.setColsTo(ps)
-
-	e.unpositioned = nil
-}
-
-func (e *Editor) spaceColsEvenlyIfWidthChanged() {
-	if e.hspaceLastLayout == e.hspace {
-		return
-	}
-
-	if e.hspace < e.hspaceLastLayout {
-		ps := e.asPackables(e.Cols)
-		p := NewPacker(0, e.hspace, ps)
-		p.SpaceEvenly()
-	}
-}
-
-func (e *Editor) asPackables(a []*Col) []Packable {
-	ps := make([]Packable, len(a))
-	for i := 0; i < len(a); i++ {
-		ps[i] = a[i]
-	}
-	sort.SliceStable(ps, func(i, j int) bool {
-		return ps[i].PackingCoord() < ps[j].PackingCoord()
-	})
-	return ps
-}
-
-func (e *Editor) setColsTo(ps []Packable) {
-	for len(e.Cols) < len(ps) {
-		e.Cols = append(e.Cols, nil)
-	}
-
-	for i := 0; i < len(ps); i++ {
-		e.Cols[i] = ps[i].(*Col)
-	}
-}
-
-func (e *Editor) bestColForXCoord(absoluteX int) *Col {
-	cols := e.VisibleCols()
-	for i, c := range cols {
-		d := 0
-		if i < len(cols)-1 {
-			d = cols[i+1].LeftX
-		}
-		log(LogCatgEditor, "Editor.bestColForXCoord: absoluteX=%d, col %d %p ends at %d\n", absoluteX, i, c, d)
-		if i >= len(cols)-1 || absoluteX < cols[i+1].LeftX {
-			return c
-		}
-	}
-	return cols[len(cols)-1]
-}
-
-func (e *Editor) markForRemoval(c *Col) {
-	e.remove = append(e.remove, c)
-}
-
-func (e *Editor) removeColsMarkedForRemoval() {
-	if e.remove == nil || len(e.remove) == 0 {
-		return
-	}
-
-	for _, c := range e.remove {
-		e.removeColumn(c)
-	}
-	e.remove = nil
-
-	e.ensureFirstVisibleColIsLeftJustified()
-}
-
-func (e *Editor) ensureFirstVisibleColIsLeftJustified() {
-	if len(e.Cols) > 0 {
-		for _, c := range e.Cols {
-			if c.Visible() {
-				c.LeftX = 0
-				return
-			}
-		}
-	}
-}
-
-func (r *Editor) moveWindowBy(w *Window, off f32.Point, absoluteX float32) {
-	// This is meant to find the right column the window has been moved to.
-	cols := r.VisibleCols()
-	for i, c := range cols {
-		if i >= len(cols) || absoluteX < float32(cols[i+1].LeftX) {
-			c.moveWindowBy(w, off)
-			break
-		}
-	}
-}
-
-func (e *Editor) moveColBy(c *Col, off f32.Point) {
-	ps := e.asPackables(e.VisibleCols())
-	p := NewPacker(0, e.hspace, ps)
-	movedPs := p.MoveTo(c, float32(c.LeftX)+off.X)
-
-	newCols := make([]*Col, 0, len(e.Cols))
-	for _, c := range e.Cols {
-		if !c.Visible() {
-			newCols = append(newCols, c)
-		}
-	}
-	for _, c := range movedPs {
-		newCols = append(newCols, c.(*Col))
-	}
-	e.Cols = newCols
 }
 
 func (e *Editor) setLastSelection(ed *editable, sel *selection) {
@@ -719,12 +909,22 @@ func (e *Editor) copyAllSelectionsFromLastSelectedEditable(gtx layout.Context) {
 	}
 }
 
-func (e *Editor) setFocusedEditable(ed *editable, owningWindow *Window) {
+func (e *Editor) setFocusedEditable(ed *editable, owner interface{}) {
 	e.focusedEditable = ed
-	e.focusedWindow = owningWindow
+
+	e.focusedFloat = nil
+	e.focusedWindow = nil
+	switch v := owner.(type) {
+	case *Window:
+		e.focusedWindow = v
+	case *Float:
+		e.focusedFloat = v
+	}
+
 	// Clear any windows that are flashed
 	e.SetOnlyFlashedWindow(nil)
 	e.clearAllRecentlyTypedText()
+	e.removeUnfocusedFloats()
 }
 
 func (e *Editor) getFocusedEditable() *editable {
@@ -902,20 +1102,24 @@ func (e *Editor) jobList() string {
 }
 
 func (e *Editor) Putall() {
-	for _, c := range e.Cols {
-		for _, w := range c.Windows {
-			if w.fileType == typeFile && !w.IsErrorsWindow() {
-				w.Put()
+	for _, l := range e.Layers {
+		for _, c := range l.Cols {
+			for _, w := range c.Windows {
+				if w.fileType == typeFile && !w.IsErrorsWindow() {
+					w.Put()
+				}
 			}
 		}
 	}
 }
 
 func (e *Editor) Getall() {
-	for _, c := range e.Cols {
-		for _, w := range c.Windows {
-			if w.fileType == typeFile && !w.IsErrorsWindow() {
-				w.Get()
+	for _, l := range e.Layers {
+		for _, c := range l.Cols {
+			for _, w := range c.Windows {
+				if w.fileType == typeFile && !w.IsErrorsWindow() {
+					w.Get()
+				}
 			}
 		}
 	}
@@ -943,62 +1147,54 @@ func (e *Editor) SetStyle(style Style) {
 	log(LogCatgEditor, "Editor.SetStyle: global VariableFont: %#v\n", VariableFont)
 	e.Tag.SetStyle(style.tagBlockStyle(), style.tagEditableStyle())
 
-	for _, c := range e.Cols {
-		c.SetStyle(style)
-		for _, w := range c.Windows {
-			w.SetStyle(style)
+	for _, l := range e.Layers {
+		l.layout.style = style
+		for _, c := range l.Cols {
+			c.SetStyle(style)
+			for _, w := range c.Windows {
+				w.SetStyle(style)
+			}
 		}
 	}
+
+	for _, f := range e.floats {
+		f.SetStyle(style)
+	}
+	
 }
 
 func (e *Editor) Execute(cmd string, args []string) {
 	e.Tag.AddOpForNextLayout(func(gtx layout.Context) {
-		e.Tag.adapter.execute(&e.Tag.blockEditable.editable, gtx, cmd, args)
+		e.Tag.adapter.execute(&e.Tag.blockEditable.editable, gtx, cmd, args, nil, 0)
 	})
 }
 
 func (e *Editor) SetOnlyFlashedWindow(win *Window) {
-	for _, c := range e.Cols {
-		for _, w := range c.Windows {
-			w.setFlash(w == win)
-		}
-		for _, w := range c.unpositioned {
-			w.setFlash(w == win)
+	for _, l := range e.Layers {
+		for _, c := range l.Cols {
+			for _, w := range c.Windows {
+				w.setFlash(w == win)
+			}
+			for _, w := range c.unpositioned {
+				w.setFlash(w == win)
+			}
 		}
 	}
 }
 
 func (e *Editor) clearAllRecentlyTypedText() {
-	for _, c := range e.Cols {
-		for _, w := range c.Windows {
-			w.Tag.ClearRecentlyTypedText()
-			w.Body.ClearRecentlyTypedText()
-		}
-		for _, w := range c.unpositioned {
-			w.Tag.ClearRecentlyTypedText()
-			w.Body.ClearRecentlyTypedText()
-		}
-	}
-}
-
-func (e *Editor) VisibleCols() []*Col {
-	r := make([]*Col, 0, len(e.Cols))
-	for _, c := range e.Cols {
-		if c.Visible() {
-			r = append(r, c)
+	for _, l := range e.Layers {
+		for _, c := range l.Cols {
+			for _, w := range c.Windows {
+				w.Tag.ClearRecentlyTypedText()
+				w.Body.ClearRecentlyTypedText()
+			}
+			for _, w := range c.unpositioned {
+				w.Tag.ClearRecentlyTypedText()
+				w.Body.ClearRecentlyTypedText()
+			}
 		}
 	}
-	return r
-}
-
-func (e *Editor) NumVisibleCols() int {
-	i := 0
-	for _, c := range e.Cols {
-		if c.Visible() {
-			i++
-		}
-	}
-	return i
 }
 
 type LRUCache struct {
@@ -1057,46 +1253,47 @@ func (c *LRUCache) All() []string {
 	return r
 }
 
-func (e *Editor) SetColVisible(colName string) {
-	for _, c := range e.Cols {
-		if c.Name() == colName {
-			c.SetVisible(true)
-		}
-	}
-}
-
-func (e *Editor) SetFirstHiddenColVisible() {
-	for _, c := range e.Cols {
-		if !c.Visible() {
-			c.SetVisible(true)
-			break
-		}
-	}
-}
-
 func (e *Editor) ListCols(includeFiles, includeShowCommand bool) string {
 	var buf bytes.Buffer
-	for _, c := range e.Cols {
-		buf.WriteString(c.Name())
-		if !c.Visible() {
-			buf.WriteString(" (hidden)")
-		}
-		if includeShowCommand {
-			if !c.Visible() {
-				fmt.Fprintf(&buf, " ◊Showcol %s◊", c.Name())
-			} else {
-				fmt.Fprintf(&buf, " ◊Hidecol %s◊", c.Name())
-			}
-		}
-		buf.WriteRune('\n')
+	al := e.activeLayer()
 
-		if includeFiles {
-			for _, w := range c.Windows {
-				file := w.displayPath.String()
-				if file == "" {
-					file = "(unnamed)"
+	for i, l := range e.Layers {
+		fmt.Fprintf(&buf, "Layer %d", i)
+
+		if l.Name != "" {
+			fmt.Fprintf(&buf, " '%s'", l.Name)
+		}
+
+		if al == l {
+			fmt.Fprintf(&buf, " (active)")
+		}
+
+		if includeShowCommand {
+			fmt.Fprintf(&buf, " ◊Setlyr %d◊", i)
+		}
+		fmt.Fprintf(&buf, "\n")
+
+		for _, c := range l.Cols {
+			buf.WriteString("  ")
+			buf.WriteString(c.Name())
+			if !c.Visible() {
+				buf.WriteString(" (hidden)")
+			}
+			if includeShowCommand {
+				if !c.Visible() {
+					fmt.Fprintf(&buf, " ◊Fetchcol %s◊", c.Name())
 				}
-				fmt.Fprintf(&buf, "  %s\n", file)
+			}
+			buf.WriteRune('\n')
+
+			if includeFiles {
+				for _, w := range c.Windows {
+					file := w.displayPath.String()
+					if file == "" {
+						file = "(unnamed)"
+					}
+					fmt.Fprintf(&buf, "    %s\n", file)
+				}
 			}
 		}
 	}
@@ -1122,4 +1319,106 @@ func (e *Editor) SetLastSelectionsWrittenToClipboard(t []string) {
 
 func (e *Editor) LastSelectionsWrittenToClipboard() []string {
 	return e.lastSelectionsWrittenToClipboard
+}
+
+func (e *Editor) markForRemoval(c *Col) {
+	l := e.activeLayer()
+	if l == nil {
+		return
+	}
+
+	l.markForRemoval(c)
+}
+
+func (e *Editor) AddFloat(f *Float) {
+	e.floats = append(e.floats, f)
+}
+
+func (e *Editor) DelFloat(f *Float) {
+	if f == nil {
+		return
+	}
+
+	evoker := e.focusedFloat.evoker
+
+	match := func(i int) bool {
+		return editor.floats[i] == f
+	}
+	e.floats = slice.RemoveFirstMatchFromSlicePreserveOrder(e.floats, match).([]*Float)
+
+	if evoker != nil {
+		evoker.AddOpForNextLayout(func(gtx layout.Context) {
+			evoker.SetFocus(gtx)
+		})
+	}
+	e.SignalRedrawRequired()
+}
+
+func (e *Editor) removeUnfocusedFloats() {
+	if e.focusedFloat != nil {
+		e.floats = []*Float{e.focusedFloat}
+	} else {
+		e.floats = nil
+	}
+}
+
+func (e *Editor) DelFocusedFloat() {
+	if e.focusedFloat == nil {
+		return
+	}
+
+	e.DelFloat(e.focusedFloat)
+}
+
+func (e *Editor) LayerIndexOfCol(col *Col) int {
+	if col == nil || col.layer == nil {
+		return -1
+	}
+
+	if len(e.Layers) == 0 {
+		return -1
+	}
+
+	for i, e := range e.Layers {
+		if e == col.layer {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func (e *Editor) LayerIndexOfWin(w *Window) int {
+	return e.LayerIndexOfCol(w.col)
+}
+
+func (e *Editor) ScrollColsInActiveLayer(n int) {
+	if len(e.Layers) == 0 {
+		log(LogCatgEditor, "Editor.activeLayer: no layer is active\n")
+		return
+	}
+
+	l := e.Layers[e.activeLayerIndex]
+	l.scrollCols(n)
+}
+
+func (e *Editor) ScrollColsInActiveLayerUntilColVisible(col *Col) {
+	if len(e.Layers) == 0 {
+		log(LogCatgEditor, "Editor.activeLayer: no layer is active\n")
+		return
+	}
+
+	l := e.Layers[e.activeLayerIndex]
+	l.scrollUntilVisible(col)
+}
+
+func (e *Editor) FindColByName(name string) *Col {
+	for _, l := range e.Layers {
+		for _, c := range l.Cols {
+			if c.Name() == name {
+				return c
+			}
+		}
+	}
+	return nil
 }

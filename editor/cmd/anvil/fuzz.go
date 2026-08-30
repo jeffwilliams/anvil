@@ -153,7 +153,8 @@ func (f *FuzzySearcher) getLinesDelim(delims []byte) (lines []rankedline) {
 func (f *FuzzySearcher) findLiveWindow() *Window {
 	dir := f.tag.adapter.dir()
 	name := fmt.Sprintf("%s+Live", dir)
-	return editor.FindWindowForFileAndDisplay(name)
+	w, _ := editor.FindWindowForFile(name)
+	return w
 }
 
 func (f *FuzzySearcher) findOrCreateLiveWindow() *Window {
@@ -161,6 +162,11 @@ func (f *FuzzySearcher) findOrCreateLiveWindow() *Window {
 
 	name := fmt.Sprintf("%s+Live", dir)
 	w := editor.FindOrCreateWindow(name)
+	if w != nil {
+		editor.EnsureWindowIsVisible(w, moveToCurrentLayer, dontMoveToCurrentColumn, nil)
+		w.GrowIfBodyTooSmall()
+	}
+
 	return w
 }
 

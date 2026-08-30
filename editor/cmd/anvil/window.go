@@ -42,7 +42,6 @@ type Window struct {
 	fileType                      fileType
 	filler                        *FillEditableWithItemList
 	initialTagUserArea            string
-	setFocusOnNextLayout          bool
 	tagShowsBodyAsChangedFromDisk bool
 	bodyDims                      layout.Dimensions
 	clones                        map[*Window]struct{}
@@ -52,6 +51,7 @@ type Window struct {
 	fuzzySearch                   *FuzzySearcher
 	onlyShowBasenamesInTag        bool
 	insertWhenTabPressed          string
+	pinnedToCurrentLayer          bool
 }
 
 type fileType int
@@ -158,9 +158,7 @@ func (c *Window) AddPackingCoordChangeListener(f func(oldVal, newVal int)) {
 // The window is drawn as large as gtx.Constraints.Max allows.
 // TODO: the row layout should pass the right constraints
 func (c *Window) Layout(gtx layout.Context) layout.Dimensions {
-	//log(LogCatgWin,"Window.Layout: window %s: body marked at start: %v\n",
-	//	c.file,
-	//	c.Body.text.IsMarked())
+	oldBodySize := c.Body.maxSizeLastLayout
 
 	c.layout.layout(gtx)
 
@@ -175,6 +173,12 @@ func (c *Window) Layout(gtx layout.Context) layout.Dimensions {
 		c.SetTagFromDisplayPath()
 	}
 	c.tagShowsBodyAsChangedFromDisk = c.bodyChangedFromDisk()
+
+	if oldBodySize != c.Body.maxSizeLastLayout {
+		// TODO: don't send this to all processes. Only to the ones
+		// that registered for window notifications.
+		c.notifyBodySizeChanged()
+	}
 
 	// Window takes up all available space.
 	return layout.Dimensions{Size: gtx.Constraints.Max}
@@ -197,12 +201,14 @@ func (l *windowLayouter) layout(gtx layout.Context) {
 	// Translate all later draw operations so they are to the right of the gutter
 	gtx.Constraints.Max.X = gtx.Constraints.Max.X - gutterDims.Size.X
 	windowStack := op.Offset(image.Point{gutterDims.Size.X, 0}).Push(gtx.Ops)
+	gtx.Values["offset"].(*OffsetStack).PushWithPurpose(image.Pt(gutterDims.Size.X, l.window.TopY), "window top Y")
 
 	tagDims := l.window.Tag.layout(gtx)
 
 	// Translate all later draw operations so they are below the tag
 	gtx.Constraints.Max.Y = gtx.Constraints.Max.Y - tagDims.Size.Y
 	op.Offset(image.Point{0, tagDims.Size.Y}).Add(gtx.Ops)
+	gtx.Values["offset"].(*OffsetStack).PushWithPurpose(image.Pt(0, tagDims.Size.Y), "window tag y offset")
 	l.window.bodyDims = l.window.Body.layout(gtx)
 
 	// Draw a line (border) at the bottom of the window
@@ -222,6 +228,8 @@ func (l *windowLayouter) layout(gtx layout.Context) {
 	l.overlayWithGrey(gtx, originalConstraints)
 
 	wholeStack.Pop()
+	gtx.Values["offset"].(*OffsetStack).Pop()
+	gtx.Values["offset"].(*OffsetStack).Pop()
 
 	l.gtx = layout.Context{}
 }
@@ -335,8 +343,8 @@ func firstNRunesStr(s string, n int) (first, rest string, runeCount int) {
 }
 
 func (w *Window) SetTagFromDisplayPath() {
-	w.Tag.label = fmt.Sprintf("tag of %s", w.DisplayPath())
-	w.Body.label = fmt.Sprintf("body of %s", w.DisplayPath())
+	w.Tag.SetLabel(fmt.Sprintf("tag of %s", w.DisplayPath()))
+	w.Body.SetLabel(fmt.Sprintf("body of %s", w.DisplayPath()))
 
 	if w.onlyShowBasenamesInTag {
 		w.setTagToBasename()
@@ -536,10 +544,18 @@ func (w *Window) Get() error {
 func (w *Window) GetWithSelect(selectBehaviour selectBehaviour, growBodyBehaviour growBodyBehaviour) error {
 	ci := w.Body.blockEditable.firstCursorIndex()
 
+	suffix := []byte(nil)
+	if w.DisplayPath().DirState() == GlobalPathIsDir {
+		suffix = w.Body.textAfterFirstBlankLine()
+	}
+
 	opts := LoadFileOpts{
-		GoTo:              seek{seekType: seekToRunePos, runePos: ci},
-		SelectBehaviour:   selectBehaviour,
-		GrowBodyBehaviour: growBodyBehaviour,
+		GoTo:                          seek{seekType: seekToRunePos, runePos: ci},
+		SelectBehaviour:               selectBehaviour,
+		GrowBodyBehaviour:             growBodyBehaviour,
+		MoveLayerBehaviour:            dontMoveToCurrentLayer,
+		MoveNonVisibleWindowBehaviour: dontMoveToCurrentColumn,
+		Suffix:                        suffix,
 	}
 
 	// In case the user changed the display string, update the file we'll load
@@ -550,13 +566,14 @@ func (w *Window) GetWithSelect(selectBehaviour selectBehaviour, growBodyBehaviou
 			w.SetLoadPath(p)
 		}
 	}
-	savedCursors := w.Tag.saveCursorsAndSelections()
+
+	sc, ss := w.Tag.saveCursorsAndSelections()
 
 	err := w.LoadFileOpts(w.DisplayPath(), w.LoadPath(), opts)
 	if err != nil {
 		return err
 	}
-	w.Tag.restoreCursorsAndSelections(savedCursors)
+	w.Tag.restoreCursorsAndSelections(sc, ss)
 
 	return nil
 }
@@ -565,6 +582,7 @@ type FillEditableWithItemList struct {
 	items     []string
 	render    *TextRenderer
 	lastWidth int
+	suffix    []byte
 }
 
 func NewFillEditableWithItemList(l *layouter, style *Style, items []string) *FillEditableWithItemList {
@@ -588,18 +606,32 @@ func (f *FillEditableWithItemList) AppendItems(items []string) {
 	f.lastWidth = 0 // Force a redraw
 }
 
+func (f *FillEditableWithItemList) setSuffix(s []byte) {
+	f.suffix = s
+}
+
 func (f *FillEditableWithItemList) preDrawHook(e *editable, gtx layout.Context) {
 	w := gtx.Constraints.Max.X
 	if w == f.lastWidth {
 		return
 	}
 
+	suffix := f.suffix
+
+	if len(suffix) == 0 {
+		suffix = e.textAfterFirstBlankLine()
+	}
+
+	if len(suffix) == 0 {
+		// Add a few extra blank lines to make it easy to append commands to the end of the directory output.
+		suffix = []byte{'\n', '\n'}
+	}
+
 	b := f.render.LayoutItemsInColumns(gtx, f.items)
-	// Add a few extra blank lines to make it easy to append commands to the end of the directory output.
-	b = append(b, '\n')
-	b = append(b, '\n')
+	b = append(b, []byte(suffix)...)
 	e.SetText(b)
 	f.lastWidth = w
+	f.suffix = []byte{}
 }
 
 func (c *Window) SetPathsAndTag(displayPath, loadPath *GlobalPath) {
@@ -909,6 +941,15 @@ func (w *Window) notifyPut() {
 	addApiNotificationToAllSessions(n)
 }
 
+func (w *Window) notifyBodySizeChanged() {
+	n := ApiNotification{
+		Op:    ApiNotificationOpWinSizeChanged,
+		WinId: w.Id,
+	}
+
+	addApiNotificationToAllSessions(n)
+}
+
 func (w *Window) SetStyle(style Style) {
 	w.layout.style = style
 	w.layout.setFontStyles(style.Fonts)
@@ -987,6 +1028,36 @@ loop:
 	}
 }
 
+// Return the window above this one.
+// May return nil.
+func (w *Window) above() *Window {
+	var win *Window
+	top := -1
+	for _, otherWin := range w.col.Windows {
+		if otherWin.TopY < w.TopY &&
+			(top == -1 || otherWin.TopY > top) {
+			win = otherWin
+			top = otherWin.TopY
+		}
+	}
+	return win
+}
+
+// Return the window below this one.
+// May return nil.
+func (w *Window) below() *Window {
+	var win *Window
+	top := -1
+	for _, otherWin := range w.col.Windows {
+		if otherWin.TopY > w.TopY &&
+			(top == -1 || otherWin.TopY < top) {
+			win = otherWin
+			top = otherWin.TopY
+		}
+	}
+	return win
+}
+
 func (w *Window) setOnlyShowBasenamesInTag(only bool) {
 	w.onlyShowBasenamesInTag = only
 	if only {
@@ -1021,4 +1092,29 @@ func (w *Window) LoadPath() *GlobalPath {
 
 func (w *Window) SetLoadPath(p *GlobalPath) {
 	w.loadPath = *p
+}
+
+func (w *Window) Del() (didNotDelete bool) {
+	if w.col == nil {
+		return
+	}
+
+	if !w.CanDelete() {
+		// Change Del to Del! in the tag
+		w.SetAllowDirtyDelete(true)
+		w.SetTagFromDisplayPath()
+		didNotDelete = true
+		return
+	}
+
+	editor.DelWindow(w)
+	return
+}
+
+func (w *Window) SetPinnedToCurrentLayer(b bool) {
+	w.pinnedToCurrentLayer = b
+}
+
+func (w *Window) IsPinnedToCurrentLayer() bool {
+	return w.pinnedToCurrentLayer
 }

@@ -81,7 +81,7 @@ func (l Lsp) DocSaved(path string) (err error) {
 // GetDefinition dets the definition of the identifier at the specified line and char in the file `path`.
 // line and char are 1-based; they are translated to 0-based
 func (l Lsp) GetDefinition(path string, line, char uint) (simple []SimpleLocation, err error) {
-	return l.getLocation("textDocument/declaration", path, line, char)
+	return l.getLocation("textDocument/definition", path, line, char)
 }
 
 func (l Lsp) GetDeclaration(path string, line, char uint) (simple []SimpleLocation, err error) {
@@ -181,9 +181,14 @@ const (
 	clangLogLevelVerbose clangLogLevel = "verbose"
 )
 
+type lspCmdOpts struct {
+	lspCmdPath string
+}
+
 type clangdOpts struct {
-	clangdPath string
-	logLevel   clangLogLevel
+	clangdPath         string
+	compileCommandsDir string
+	logLevel           clangLogLevel
 }
 
 func newClangdOpts() clangdOpts {
@@ -193,9 +198,53 @@ func newClangdOpts() clangdOpts {
 	}
 }
 
-func initClang(opts clangdOpts) (client rpc.Conn, err error) {
-	log := fmt.Sprintf("--log=%s", opts.logLevel)
-	cmd := exec.Command(opts.clangdPath, log, "--background-index")
+func initClangd(cmdOpts lspCmdOpts, clangOpts clangdOpts) (client rpc.Conn, err error) {
+	log := fmt.Sprintf("--log=%s", clangOpts.logLevel)
+
+	args := []string{log, "--background-index"}
+	if clangOpts.compileCommandsDir != "" {
+		args = append(args, fmt.Sprintf("--compile-commands-dir=%s", clangOpts.compileCommandsDir))
+	}
+	return initLsp("clangd", cmdOpts.lspCmdPath, args...)
+
+	//	cmd := exec.Command(opts.clangdPath, args...)
+	//
+	//	stdin, err := cmd.StdinPipe()
+	//	if err != nil {
+	//		err = fmt.Errorf("creating stdin pipe to clangd failed: %v", err)
+	//		return
+	//	}
+	//
+	//	stdout, err := cmd.StdoutPipe()
+	//	if err != nil {
+	//		err = fmt.Errorf("creating stdin pipe to clangd failed: %v", err)
+	//		return
+	//	}
+	//
+	//	cmd.Stderr = os.Stderr
+	//
+	//	err = cmd.Start()
+	//	if err != nil {
+	//		err = fmt.Errorf("starting clangd failed: %v", err)
+	//		return
+	//	}
+	//
+	//	rw := ReadWriter{stdout, stdin}
+	//	stream := rpc.NewStream(rw)
+	//	client = rpc.NewConn(stream)
+	//
+	//	client.Go(context.Background(), handler)
+	//
+	//	return
+
+}
+
+func initGopls(opts lspCmdOpts) (client rpc.Conn, err error) {
+	return initLsp("gopls", opts.lspCmdPath)
+}
+
+func initLsp(friendlyLspCmdName, cmdPath string, args ...string) (client rpc.Conn, err error) {
+	cmd := exec.Command(cmdPath, args...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -213,7 +262,7 @@ func initClang(opts clangdOpts) (client rpc.Conn, err error) {
 
 	err = cmd.Start()
 	if err != nil {
-		err = fmt.Errorf("starting clangd failed: %v", err)
+		err = fmt.Errorf("starting %s failed: %v", friendlyLspCmdName, err)
 		return
 	}
 
@@ -224,5 +273,4 @@ func initClang(opts clangdOpts) (client rpc.Conn, err error) {
 	client.Go(context.Background(), handler)
 
 	return
-
 }

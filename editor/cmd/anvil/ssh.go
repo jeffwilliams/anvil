@@ -113,6 +113,13 @@ func (cache *SshClientCache) rmLeastRecentlyUsed() {
 	delete(cache.data, minK)
 }
 
+func (cache *SshClientCache) Clear() {
+	cache.lock.Lock()
+	defer cache.lock.Unlock()
+
+	cache.data = make(map[SshEndpt]SshClientCacheEntry)
+}
+
 func (cache *SshClientCache) dial(endpt SshEndpt, kill chan struct{}) (client *ssh.Client, err error) {
 	log(LogCatgSsh, "SshClientCache: creating new ssh client object\n")
 
@@ -211,16 +218,19 @@ func (cache *SshClientCache) dialWithProxy(network, addr string, conf *ssh.Clien
 
 	proxyClient, err := ssh.Dial("tcp", proxyAddr, proxyConf)
 	if err != nil {
+		log(LogCatgSsh, "SshClientCache: dialWithProxy: dialing to proxy '%s' failed: %v\n", proxyAddr, err)
 		return
 	}
 
 	conn, err := proxyClient.Dial(network, addr)
 	if err != nil {
+		log(LogCatgSsh, "SshClientCache: dialWithProxy: dialing from proxy '%s' to host '%s' failed: %v\n", proxyAddr, addr, err)
 		return
 	}
 
 	ncc, chans, reqs, err := ssh.NewClientConn(conn, addr, conf)
 	if err != nil {
+		log(LogCatgSsh, "SshClientCache: dialWithProxy: creating SSH connection over transport for proxy '%s', host '%s' failed: %v\n", proxyAddr, addr, err)
 		return
 	}
 
@@ -287,7 +297,11 @@ func (cache *SshClientCache) getKeyfileAuths() []ssh.AuthMethod {
 func (cache *SshClientCache) makeKeyfileAuths() {
 	log(LogCatgSsh, "SshClientCache: building auths\n")
 
-	signers, _ := cache.sshAgentSigners()
+	signers, err := cache.sshAgentSigners()
+	if err != nil {
+		log(LogCatgSsh, "SshClientCache: making auth from SSH agent failed: %s\n", err)
+	}
+	log(LogCatgSsh, "SshClientCache: loaded %d auths from SSH agent\n", len(signers))
 
 	for fname, key := range cache.keys {
 		log(LogCatgSsh, "SshClientCache: making auth for key %s\n", fname)
@@ -326,6 +340,9 @@ func (cache *SshClientCache) signerForKey(filename string, key []byte) ssh.Signe
 
 func (cache *SshClientCache) sshAgentSigners() ([]ssh.Signer, error) {
 	socket := os.Getenv("SSH_AUTH_SOCK")
+	if socket == "" {
+		return nil, fmt.Errorf("No SSH_AUTH_SOCK environment variable set")
+	}
 	conn, err := net.Dial("unix", socket)
 	if err != nil {
 		return nil, err
@@ -460,4 +477,23 @@ func (s *SshClient) NewSession() (*ssh.Session, error) {
 	sess, err := s.client.NewSession()
 	err = prefixWithSshEndpt(s.endpt, "SshClient.NewSession", err)
 	return sess, err
+}
+
+func (s *SshClient) SetenvAsync(sess *ssh.Session, name, value string) error {
+	envRequest := struct {
+		Name  string
+		Value string
+	}{
+		Name:  name,
+		Value: value,
+	}
+
+	payload := ssh.Marshal(envRequest)
+
+	_, err := sess.SendRequest("env", false, payload)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

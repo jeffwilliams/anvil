@@ -1,8 +1,9 @@
 package intvl
 
 import (
-	"github.com/jeffwilliams/anvil/editor/internal/slice"
 	"sort"
+
+	"github.com/jeffwilliams/anvil/editor/internal/slice"
 )
 
 // An interval represents a half-open range including the first element but not the last.
@@ -239,4 +240,52 @@ type IntervalChange struct {
 func Overlaps(a, b Interval) bool {
 	exl := a.End() <= b.Start() || b.End() <= a.Start()
 	return !exl
+}
+
+// Contains returns true if child is contained within or equals parent.
+func Contains(parent, child Interval) bool {
+	return child.Start() >= parent.Start() && child.End() <= parent.End()
+}
+
+func Len(i Interval) int {
+	return i.End() - i.Start()
+}
+
+// Diff removes from a the portion of b that overlaps it, and returns the result.
+func Diff(a, b Interval) Interval {
+	if !Overlaps(a, b) {
+		return a
+	}
+
+	var newA simpleInterval
+	newA.start = a.Start()
+	newA.end = a.End()
+
+	if a.Start() >= b.Start() && a.End() <= b.End() {
+		newA.start = b.Start()
+		newA.end = b.Start()
+		return newA
+	}
+
+	if a.Start() < b.End() && a.End() >= b.End() {
+		newA.start = b.End()
+	}
+
+	if a.End() > b.Start() && a.Start() <= b.Start() {
+		newA.end = b.Start()
+	}
+
+	return newA
+}
+
+type simpleInterval struct {
+	start, end int
+}
+
+func (i simpleInterval) Start() int {
+	return i.start
+}
+
+func (i simpleInterval) End() int {
+	return i.end
 }

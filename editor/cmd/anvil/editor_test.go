@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRemoveTagFromString(t *testing.T) {
 
@@ -200,6 +203,12 @@ func TestSubstitute(t *testing.T) {
 			replacements: nil,
 			output:       "echo ",
 		},
+		{
+			name:         "dollar replace",
+			template:     "echo $$b",
+			replacements: nil,
+			output:       "echo $b",
+		},
 	}
 
 	for _, tc := range tests {
@@ -209,6 +218,217 @@ func TestSubstitute(t *testing.T) {
 
 			if result != tc.output {
 				t.Fatalf("Expected '%s' but got '%s'", tc.output, result)
+			}
+		})
+	}
+}
+
+func TestBasenameLikelyStartsWith(t *testing.T) {
+
+	tests := []struct {
+		name     string
+		path     string
+		needle   rune
+		expected bool
+	}{
+		{
+			name:     "empty",
+			path:     "",
+			needle:   '+',
+			expected: false,
+		},
+		{
+			name:     "no-directory",
+			path:     "+thing",
+			needle:   '+',
+			expected: true,
+		},
+		{
+			name:     "no-directory negative",
+			path:     "+thing",
+			needle:   '0',
+			expected: false,
+		},
+		{
+			name:     "root",
+			path:     "/+thing",
+			needle:   '+',
+			expected: true,
+		},
+		{
+			name:     "root negative",
+			path:     "/+thing",
+			needle:   '0',
+			expected: false,
+		},
+		{
+			name:     "dir",
+			path:     "/p/+thing",
+			needle:   '+',
+			expected: true,
+		},
+		{
+			name:     "dir negative",
+			path:     "/p/+thing",
+			needle:   '0',
+			expected: false,
+		},
+		{
+			name:     "windows",
+			path:     "C:\\+thing",
+			needle:   '+',
+			expected: true,
+		},
+		{
+			name:     "windows negative",
+			path:     "C:\\+thing",
+			needle:   '0',
+			expected: false,
+		},
+		{
+			name:     "windows negative 2",
+			path:     "C:\\+thing",
+			needle:   'C',
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+
+			result := BasenameLikelyStartsWith(tc.path, tc.needle)
+
+			if result != tc.expected {
+				t.Fatalf("Expected '%v' but got '%v'", tc.expected, result)
+			}
+		})
+	}
+}
+
+func TestMoveActiveLayerTo(t *testing.T) {
+	tests := []struct {
+		name          string
+		initialLayers []string
+		indexToMove   int
+		moveToIndex   int
+		finalLayers   []string
+	}{
+		{
+			name:          "no-layers",
+			initialLayers: []string{},
+			indexToMove:   1,
+			moveToIndex:   2,
+			finalLayers:   []string{},
+		},
+		{
+			name:          "one-layer",
+			initialLayers: []string{"base"},
+			indexToMove:   1,
+			moveToIndex:   2,
+			finalLayers:   []string{"base"},
+		},
+		{
+			name:          "two-layer-no-op",
+			initialLayers: []string{"base", "tax"},
+			indexToMove:   0,
+			moveToIndex:   0,
+			finalLayers:   []string{"base", "tax"},
+		},
+		{
+			name:          "two-layer-no-op2",
+			initialLayers: []string{"base", "tax"},
+			indexToMove:   0,
+			moveToIndex:   -1,
+			finalLayers:   []string{"base", "tax"},
+		},
+		{
+			name:          "two-layer-no-op3",
+			initialLayers: []string{"base", "tax"},
+			indexToMove:   1,
+			moveToIndex:   9,
+			finalLayers:   []string{"base", "tax"},
+		},
+		{
+			name:          "two-layer-move-up",
+			initialLayers: []string{"base", "tax"},
+			indexToMove:   0,
+			moveToIndex:   1,
+			finalLayers:   []string{"tax", "base"},
+		},
+		{
+			name:          "two-layer-move-up-high",
+			initialLayers: []string{"base", "tax"},
+			indexToMove:   0,
+			moveToIndex:   9,
+			finalLayers:   []string{"tax", "base"},
+		},
+		{
+			name:          "two-layer-move-down",
+			initialLayers: []string{"base", "tax"},
+			indexToMove:   1,
+			moveToIndex:   -1,
+			finalLayers:   []string{"tax", "base"},
+		},
+		{
+			name:          "two-layer-move-down",
+			initialLayers: []string{"base", "tax"},
+			indexToMove:   1,
+			moveToIndex:   0,
+			finalLayers:   []string{"tax", "base"},
+		},
+		{
+			name:          "five-layer-move",
+			initialLayers: []string{"a", "b", "c", "d", "e"},
+			indexToMove:   1,
+			moveToIndex:   3,
+			finalLayers:   []string{"a", "c", "d", "b", "e"},
+		},
+		{
+			name:          "five-layer-move-back",
+			initialLayers: []string{"a", "b", "c", "d", "e"},
+			indexToMove:   3,
+			moveToIndex:   1,
+			finalLayers:   []string{"a", "d", "b", "c", "e"},
+		},
+		{
+			name:          "five-layer-move-to-first",
+			initialLayers: []string{"a", "b", "c", "d", "e"},
+			indexToMove:   2,
+			moveToIndex:   0,
+			finalLayers:   []string{"c", "a", "b", "d", "e"},
+		},
+		{
+			name:          "five-layer-move-to-last",
+			initialLayers: []string{"a", "b", "c", "d", "e"},
+			indexToMove:   2,
+			moveToIndex:   9,
+			finalLayers:   []string{"a", "b", "d", "e", "c"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+
+			var ed Editor
+			for _, n := range tc.initialLayers {
+				ed.Layers = append(ed.Layers, &Layer{Name: n})
+			}
+
+			ed.activeLayerIndex = tc.indexToMove
+			ed.MoveActiveLayerTo(tc.moveToIndex)
+
+			if len(ed.Layers) != len(tc.finalLayers) {
+				t.Fatalf("After move, the number of layers changed")
+			}
+
+			for i, l := range ed.Layers {
+				if l.Name != tc.finalLayers[i] {
+					var names []string
+					for _, l := range ed.Layers {
+						names = append(names, l.Name)
+					}
+					t.Fatalf("Expected layer '%s' at index i but there is instead '%s'. All layers:\n %s", tc.finalLayers[i], l.Name, strings.Join(names, "\n"))
+				}
 			}
 		})
 	}

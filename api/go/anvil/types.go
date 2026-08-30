@@ -7,7 +7,9 @@ type Window struct {
 }
 
 type WindowBody struct {
-	Len int
+	Len           int
+	WidthInRunes  int
+	HeightInRunes int
 }
 
 type Notification struct {
@@ -31,6 +33,10 @@ const (
 	NotificationOpPut
 	NotificationOpFileClosed
 	NotificationOpFileOpened
+	NotificationOpKeyPress
+	NotificationOpTextInput
+	NotificationOpWinSizeChanged
+	NotificationOpWinClosed
 )
 
 type ExecuteReq struct {
@@ -48,4 +54,14 @@ type AnvilInfo struct {
 	Cwd     string
 	ConfDir string
 	Title   string
+}
+
+type KeyPress struct {
+	KeyName   string
+	Modifiers int
+}
+
+type Tint struct {
+	Start, End int
+	Tint       string
 }

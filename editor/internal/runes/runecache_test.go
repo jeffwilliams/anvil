@@ -332,3 +332,119 @@ func TestClearAfter(t *testing.T) {
 		})
 	}
 }
+
+type removeFirstNRunesThenQuery struct {
+	n                  int
+	changeDocTo        string
+	runeOffset         int
+	expectedByteOffset int
+}
+
+func TestRemoveFirstNRunes(t *testing.T) {
+	tests := []struct {
+		name       string
+		initialDoc string
+		interval   int
+		queries    []removeFirstNRunesThenQuery
+	}{
+		{
+			name:       "emptydoc",
+			initialDoc: "",
+			interval:   4,
+			queries: []removeFirstNRunesThenQuery{
+				{
+					n:                  0,
+					runeOffset:         0,
+					expectedByteOffset: 0,
+				},
+				{
+					n:                  3,
+					runeOffset:         3,
+					expectedByteOffset: 0,
+				},
+			},
+		},
+		{
+			name:       "basic",
+			initialDoc: "123412341234123",
+			interval:   4,
+			queries: []removeFirstNRunesThenQuery{
+				{
+					n:                  0,
+					runeOffset:         0,
+					expectedByteOffset: 0,
+				},
+				{
+					n:                  0,
+					runeOffset:         3,
+					expectedByteOffset: 3,
+				},
+				{
+					n:                  3,
+					runeOffset:         1,
+					expectedByteOffset: 1,
+					// Our doc changed
+					changeDocTo: "412341234123",
+				},
+				{
+					n:                  3,
+					runeOffset:         6,
+					expectedByteOffset: 6,
+					// Our doc changed
+					changeDocTo: "412341234123",
+				},
+				{
+					n:                  3,
+					runeOffset:         11,
+					expectedByteOffset: 11,
+					// Our doc changed
+					changeDocTo: "412341234123",
+				},
+			},
+		},
+		{
+			name: "multibyte",
+			// section marker is a 2-byte character
+			initialDoc: "123§12341234123",
+			interval:   4,
+			queries: []removeFirstNRunesThenQuery{
+				{
+					n:                  0,
+					runeOffset:         4,
+					expectedByteOffset: 5,
+				},
+				{
+					n:                  4,
+					changeDocTo:        "12341234123",
+					runeOffset:         3,
+					expectedByteOffset: 3,
+				},
+				{
+					n:                  6,
+					changeDocTo:        "341234123",
+					runeOffset:         3,
+					expectedByteOffset: 3,
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+
+			for i, q := range tc.queries {
+				cache := NewOffsetCache(tc.interval)
+				doc := []byte(tc.initialDoc)
+				cache.Update(doc)
+
+				cache.RemoveFirstNRunes(doc, q.n)
+				if q.changeDocTo != "" {
+					doc = []byte(q.changeDocTo)
+				}
+				boff, err, _ := cache.Get(doc, q.runeOffset)
+				assert.Equal(t, nil, err)
+				assert.Equal(t, q.expectedByteOffset, boff, fmt.Sprintf("on query %d", i))
+			}
+		})
+	}
+}

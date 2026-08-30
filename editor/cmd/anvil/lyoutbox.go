@@ -1,6 +1,9 @@
 package main
 
 import (
+	"image"
+	"image/color"
+
 	"gioui.org/f32"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
@@ -11,8 +14,6 @@ import (
 	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"github.com/jeffwilliams/anvil/editor/internal/events"
-	"image"
-	"image/color"
 )
 
 type layoutBox struct {
@@ -23,6 +24,7 @@ type layoutBox struct {
 	window                    *Window
 	col                       *Col
 	dragging                  bool
+	ignoreRelease             bool
 	pointerState              PointerState
 	lastGrowPointerEventPress *pointer.Event
 	lastGrowYOffset           int
@@ -96,6 +98,7 @@ func (l *layoutBox) onPointerPrimaryButtonPress(ps *PointerState) {
 	log(LogCatgWin, "primary button press on layout box at %s\n", ps.currentPointerEvent.Position)
 	l.pressPos = ps.currentPointerEvent.Position
 	l.dragging = false
+	l.ignoreRelease = false
 
 	if l.col != nil {
 		if ps.currentPointerEvent.Modifiers&key.ModShift != 0 {
@@ -103,6 +106,17 @@ func (l *layoutBox) onPointerPrimaryButtonPress(ps *PointerState) {
 			l.col.setWindowsOnlyShowBasenamesInTag(true)
 		} else if ps.currentPointerEvent.Modifiers&key.ModCtrl != 0 {
 			l.col.SpaceEvenly()
+		}
+	}
+
+	if l.window != nil {
+		if ps.currentPointerEvent.Modifiers&key.ModCtrl != 0 {
+			if l.window.IsPinnedToCurrentLayer() {
+				l.window.SetPinnedToCurrentLayer(false)
+			} else {
+				l.window.SetPinnedToCurrentLayer(true)
+			}
+			l.ignoreRelease = true
 		}
 	}
 }
@@ -131,6 +145,10 @@ func (l *layoutBox) onPointerDrag(ps *PointerState) {
 }
 
 func (l *layoutBox) onPointerRelease(ps *PointerState) {
+	if l.ignoreRelease {
+		return
+	}
+
 	log(LogCatgWin, "button release for %s on layout box. col: %p, window %p\n", ps.currentPointerEvent.Buttons, l.col, l.window)
 	if l.dragging {
 		// For some reason button release doesn't indicate which button was released...
@@ -144,7 +162,7 @@ func (l *layoutBox) onPointerRelease(ps *PointerState) {
 			} else {
 
 				// This is a layout box of a column. Move the column
-				l.col.ed.moveColBy(l.col, ps.currentPointerEvent.Position.Sub(l.pressPos))
+				l.col.layer.moveColBy(l.col, ps.currentPointerEvent.Position.Sub(l.pressPos))
 			}
 		}
 		l.dragging = false
@@ -194,6 +212,17 @@ func (l *layoutBox) draw(gtx layout.Context) layout.Dimensions {
 	// Append the operation that fills the clip region with the pen
 	paint.PaintOp{}.Add(gtx.Ops)
 	st2.Pop()
+
+	if l.window != nil && l.window.pinnedToCurrentLayer {
+		w := float32(gw)
+		lh := float32(l.lineHeight())
+		st = drawFilledCircle(gtx, int(w/3), int(lh/3), int(w*2/3), int(lh*2/3))
+		paint.ColorOp{Color: l.dotColor()}.Add(gtx.Ops)
+		// Append the operation that fills the clip region with the pen
+		paint.PaintOp{}.Add(gtx.Ops)
+		st.Pop()
+	}
+
 	return layout.Dimensions{Size: image.Point{X: gw, Y: int(l.lineHeight())}}
 }
 
@@ -208,6 +237,14 @@ func (l *layoutBox) bgColor() color.NRGBA {
 		bgColor = l.style.UnsavedBgColor
 	}
 	return bgColor
+}
+
+func (l *layoutBox) dotColor() color.NRGBA {
+	c := l.style.FgColor
+	if l.window != nil && l.window.bodyChangedFromDisk() && !l.window.IsErrorsWindow() && l.window.fileType != typeDir {
+		c = l.style.BgColor
+	}
+	return c
 }
 
 func (l *layoutBox) listenForEvents(gtx layout.Context) {

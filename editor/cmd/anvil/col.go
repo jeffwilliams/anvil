@@ -19,7 +19,10 @@ type Col struct {
 	Id      int
 	Tag     Tag
 	Windows []*Window
-	LeftX   int // X position of the left of the column
+	// layedOutColIndex is the index in the visible columns in the layer of this column.
+	// Each time the layer is drawn this value is set. Index 0 is the leftmost visible column,
+	// 1 is the one to the right of that, and so on.
+	layedOutColIndex int
 
 	unpositioned, remove, resized, minimizedExcept, maximize, center []*Window
 
@@ -34,13 +37,12 @@ type Col struct {
 	maximizedWindow  *Window
 	layoutBox        layoutBox
 	layout           colLayouter
-	ed               *Editor
+	layer            *Layer
 
 	// vspace is the total vertical space avialable to windows inside this row
 	vspace    float32
 	Scheduler *Scheduler
 	workChan  chan Work
-	visible   bool
 }
 
 type colLayouter struct {
@@ -50,6 +52,7 @@ type colLayouter struct {
 	style Style
 	width int
 	gtxOps
+	layoutBoxDims layout.Dimensions
 }
 
 func NewCol(style Style) *Col {
@@ -61,7 +64,6 @@ func NewCol(style Style) *Col {
 				lineSpacing: style.LineSpacing,
 			},
 		},
-		visible: true,
 	}
 
 	r.Id = application.colIdGenerator.Get()
@@ -76,17 +78,23 @@ func NewCol(style Style) *Col {
 
 func (r *Col) NewWindow() *Window {
 	w := NewWindow(r, r.layout.style)
+	r.AddWindow(w)
+	return w
+}
 
+func (r *Col) AddWindow(w *Window) {
+	if r == nil {
+		fmt.Printf("Col.AddWindow called with nil col\n")
+	}
+	w.col = r
 	// Position the new window
-	if len(r.Windows) == 0 {
+	if r.Windows == nil || len(r.Windows) == 0 {
 		w.TopY = 0
 		r.Windows = append(r.Windows, w)
 	} else {
 		// TODO: if there is not enough space fail making this window?
 		r.unpositioned = append(r.unpositioned, w)
 	}
-
-	return w
 }
 
 func (r *Col) NewWindowDontPosition() *Window {
@@ -143,6 +151,9 @@ func (r *Col) setConstraintsToWindowHeight(gtx *layout.Context, winIndex int) {
 }
 
 func (l *colLayouter) HandleEvents(gtx layout.Context) {
+	gtx.Values["offset"].(*OffsetStack).PushWithPurpose(image.Pt(l.layoutBoxDims.Size.X, 0), fmt.Sprintf("layout box x for col %d", l.col.Id))
+	defer gtx.Values["offset"].(*OffsetStack).Pop()
+
 	l.gtx = gtx
 	l.gtxOps.gtx = gtx
 
@@ -160,20 +171,18 @@ func (l *colLayouter) DrawAndListenForEvents(gtx layout.Context) layout.Dimensio
 	l.gtxOps.gtx = gtx
 	l.width = l.gtx.Constraints.Max.X
 
-	defer l.offset(l.col.LeftX, 0).Pop()
-
-	lboxDims := l.drawLayoutBox(l.gtx)
+	l.layoutBoxDims = l.drawLayoutBox(l.gtx)
 
 	// Translate all later draw operations so they are to the right of the layoutBox
-	defer l.offset(lboxDims.Size.X, 0).Pop()
-	l.gtx.Constraints.Max.X -= lboxDims.Size.X
-	tagDims := l.col.Tag.DrawAndListenForEvents(l.gtx)
-	l.gtx.Constraints.Max.X += lboxDims.Size.X
-	defer l.offset(-lboxDims.Size.X, tagDims.Size.Y).Pop()
+	defer l.offset(l.layoutBoxDims.Size.X, 0).Pop()
+	l.gtx.Constraints.Max.X -= l.layoutBoxDims.Size.X
+	tagDims := l.col.Tag.layout(l.gtx)
+	l.gtx.Constraints.Max.X += l.layoutBoxDims.Size.X
+	defer l.offset(-l.layoutBoxDims.Size.X, tagDims.Size.Y).Pop()
 
 	// In case the tag takes up multiple lines, color in the part under
 	// the layout box
-	l.fillUnderLayoutBox(gtx, tagDims.Size.Y-lboxDims.Size.Y)
+	l.fillUnderLayoutBox(gtx, tagDims.Size.Y-l.layoutBoxDims.Size.Y)
 
 	// Draw a line (border) under the header
 	botBorderHeight := l.drawBottomBorder(l.gtx)
@@ -191,8 +200,6 @@ func (l *colLayouter) setOffsetAndLayoutWindows(gtx layout.Context, startY int) 
 	l.gtxOps.gtx = gtx
 	l.width = l.gtx.Constraints.Max.X
 
-	defer l.offset(l.col.LeftX, 0).Pop()
-
 	borderw := gtx.Metric.Dp(l.style.WinBorderWidth)
 
 	st := l.offset(l.gtx.Constraints.Max.X-borderw, 0)
@@ -201,6 +208,8 @@ func (l *colLayouter) setOffsetAndLayoutWindows(gtx layout.Context, startY int) 
 	l.gtx.Constraints.Max.X -= borderw
 
 	defer l.offset(0, startY).Pop()
+	gtx.Values["offset"].(*OffsetStack).PushWithPurpose(image.Pt(0, startY), fmt.Sprintf("window starty in col %d", l.col.Id))
+	defer gtx.Values["offset"].(*OffsetStack).Pop()
 
 	if len(l.col.Windows) > 0 {
 		l.layoutWindows()
@@ -412,8 +421,14 @@ func (r *Col) printWindowPositions() {
 }
 
 func (c *Col) moveWindowBy(w *Window, off f32.Point) {
-	absX := off.X + float32(c.LeftX)
-	c2 := c.ed.bestColForXCoord(int(absX))
+
+	x := c.layer.leftXOfVisibleColumn(c.layedOutColIndex)
+	if x < 0 {
+		return
+	}
+
+	absX := off.X + float32(x)
+	c2 := c.layer.bestColForXCoord(int(absX))
 	if c2 != c {
 		c.moveWindowToNewCol(w, c, c2, off)
 		return
@@ -432,9 +447,19 @@ func (c *Col) moveWindowToNewCol(w *Window, from, to *Col, off f32.Point) {
 	if from == to {
 		return
 	}
+
+	fromX := c.layer.leftXOfVisibleColumn(from.layedOutColIndex)
+	if fromX < 0 {
+		return
+	}
+	toX := c.layer.leftXOfVisibleColumn(to.layedOutColIndex)
+	if toX < 0 {
+		return
+	}
+
 	from.markForRemoval(w)
 	w.col = to
-	xDiff := float32(to.LeftX - from.LeftX)
+	xDiff := float32(toX - fromX)
 	to.moveWindowBy(w, off.Sub(f32.Pt(xDiff, 0)))
 
 	c.adjustWindowPathsWhenMovedBetweenCols(w, from, to)
@@ -521,14 +546,6 @@ func (c *Col) centerWindowsMarkedForCentering() {
 	c.center = c.center[:0]
 }
 
-func (r *Col) PackingCoord() float32 {
-	return float32(r.LeftX)
-}
-
-func (r *Col) SetPackingCoord(v float32) {
-	r.LeftX = int(v)
-}
-
 func (r *Col) Clear() {
 	for _, w := range r.Windows {
 		r.removeWindow(w)
@@ -581,26 +598,7 @@ func (c *Col) SetStyle(style Style) {
 }
 
 func (c *Col) Visible() bool {
-	return c.visible
-}
-
-func (c *Col) SetVisible(v bool) {
-	if c.visible == v {
-		return
-	}
-
-	if !v && editor.NumVisibleCols() <= 1 {
-		return
-	}
-
-	c.visible = v
-	if c.visible {
-		editor.RepositionCol(c)
-		return
-	}
-
-	editor.ensureFirstVisibleColIsLeftJustified()
-	editor.SignalRedrawRequired()
+	return c.layer.ColVisible(c)
 }
 
 func (c *Col) Name() string {
@@ -634,6 +632,34 @@ func (c *Col) Path() (path *GlobalPath, ok bool) {
 
 func (c *Col) hasNoUserSetName() bool {
 	return strings.HasPrefix(c.Tag.String(), "New")
+}
+
+// The visible column to the left of the given column.
+// May return nil.
+func (c *Col) left() *Col {
+	return c.layer.visibleColLeftOf(c.layedOutColIndex)
+}
+
+// The column to the right of the given column.
+// May return nil.
+func (c *Col) right() *Col {
+	return c.layer.visibleColRightOf(c.layedOutColIndex)
+}
+
+// The window in this column at approximately this position.
+// May return nil if the column has no windows.
+func (c *Col) windowAt(y int) *Window {
+	var win *Window
+	top := -1
+	for _, otherWin := range c.Windows {
+		// Use <= because the other window might be at the exact same Y.
+		if otherWin.TopY <= y &&
+			(top == -1 || otherWin.TopY > top) {
+			win = otherWin
+			top = otherWin.TopY
+		}
+	}
+	return win
 }
 
 func (c *Col) setWindowsOnlyShowBasenamesInTag(only bool) {

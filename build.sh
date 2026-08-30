@@ -7,6 +7,7 @@ now=$(date +'%Y-%m-%d_%T')
 ldflags="-X main.buildVersion=$vers -X main.buildTime=$now"
 go_build_flags=""
 make_go_workspace_only=no
+unmake_go_workspace_only=no
 
 function usage() {
   echo "Usage: "
@@ -40,6 +41,9 @@ function parse_opts() {
         ;;
       w)
         make_go_workspace_only=yes
+        ;;
+      W)
+        unmake_go_workspace_only=yes
         ;;
       h)
         usage
@@ -274,6 +278,20 @@ function build_all_os_and_arch() {
   done
 }
 
+function backup_go_workspace() {
+  if [ -e "go.work" ]
+  then
+     mv go.work go.work.bld-backup
+  fi
+}
+
+function restore_go_workspace() {
+  if [ -e "go.work.bld-backup" ]
+  then
+     mv go.work.bld-backup go.work 
+  fi
+}
+
 function init_go_workspace() {
   [ -e "go.work" ] && rm go.work
   go work init ./editor ./extras ./api/go/anvil
@@ -285,11 +303,20 @@ function deinit_go_workspace() {
 
 parse_opts $@
 
-init_go_workspace
-if [ "$make_go_workspace_only" = "yes" ]
+if [ "$unmake_go_workspace_only" = "yes" ]
 then
+  deinit_go_workspace
   exit 0
 fi
+
+if [ "$make_go_workspace_only" = "yes" ]
+then
+  init_go_workspace
+  exit 0
+fi
+
+backup_go_workspace
+init_go_workspace
 
 clean
 
@@ -298,3 +325,4 @@ echo "Building version $vers"
 build_all_os_and_arch
 
 deinit_go_workspace
+restore_go_workspace

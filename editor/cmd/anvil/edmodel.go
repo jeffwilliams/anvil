@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"slices"
+	"sort"
+	"unicode"
+	"unicode/utf8"
+
 	"github.com/jeffwilliams/anvil/editor/internal/intvl"
 	"github.com/jeffwilliams/anvil/editor/internal/pctbl"
 	"github.com/jeffwilliams/anvil/editor/internal/runes"
 	"github.com/jeffwilliams/anvil/editor/internal/words"
-	"sort"
-	"unicode"
-	"unicode/utf8"
 )
 
 // EditableModel contains the state of an editable that is
@@ -37,6 +40,8 @@ type editableModel struct {
 	matchingBracketInsertion matchingBracketInsertion
 	writeLock                editableWriteLock
 	recentlyTypedText        textRange
+	// label is a name for this editable model used for debugging
+	label string
 }
 
 func (e *editableModel) SetTextString(s string) {
@@ -121,33 +126,35 @@ func (e *editableModel) firstNRunes(doc []byte, n int) (data []byte, runeCount i
 	return
 }
 
-func (e *editableModel) textObjectForAcquireAt(runeIndex int) string {
+func (e *editableModel) textObjectForAcquireAt(runeIndex int) (string, textRange) {
 	return e.textObjectAt(runeIndex, false)
 }
 
-func (e *editableModel) textObjectForExecutionAt(runeIndex int) string {
+func (e *editableModel) textObjectForExecutionAt(runeIndex int) (string, textRange) {
 	return e.textObjectAt(runeIndex, true)
 }
 
-func (e *editableModel) textObjectForSearchAt(runeIndex int) string {
+func (e *editableModel) textObjectForSearchAt(runeIndex int) (string, textRange) {
 	return e.textObjectAt(runeIndex, true)
 }
 
-func (e *editableModel) textObjectAt(runeIndex int, considerLozenges bool) string {
+func (e *editableModel) textObjectAt(runeIndex int, considerLozenges bool) (string, textRange) {
 	w := runes.NewWalker(e.Bytes())
 	sel := e.selectionContaining(runeIndex)
 	if sel != nil {
-		return string(w.TextBetweenRuneIndicesCache(sel.start, sel.end, &e.runeOffsetCache))
+		return string(w.TextBetweenRuneIndicesCache(sel.start, sel.end, &e.runeOffsetCache)), textRange{sel.start, sel.end}
 	}
 
 	w.SetRunePosCache(runeIndex, &e.runeOffsetCache)
 
 	getWord := true
 	var s string
+	var tr textRange
 
 	if considerLozenges {
 		var wasDelimited bool
 		s, wasDelimited = w.CurrentLozengeDelimitedStringInLine()
+		tr.start, tr.end = w.CurrentLozengeDelimitedStringInLineBounds()
 		if wasDelimited {
 			getWord = false
 		}
@@ -155,9 +162,10 @@ func (e *editableModel) textObjectAt(runeIndex int, considerLozenges bool) strin
 
 	if getWord {
 		s = w.CurrentWord()
+		tr.start, tr.end = w.CurrentWordBounds()
 	}
 
-	return s
+	return s, tr
 }
 
 type completionContext struct {
@@ -714,30 +722,54 @@ func (e *editableModel) Len() int {
 	return e.text.Len()
 }
 
-func (e *editableModel) AddManualHighlightForEachSelection(color Color) {
+func (e *editableModel) AddManualHighlightForEachSelection(fgColor, bgColor Color) {
 	if e.writeLock.isLocked() {
 		return
 	}
 	for _, s := range e.selections {
-		e.AddManualHighlight(s.start, s.end, color)
+		e.AddManualHighlight(s.start, s.end, fgColor, bgColor)
 	}
 }
 
-func (e *editableModel) AddManualHighlight(start, end int, color Color) {
+func (e *editableModel) AddManualHighlight(start, end int, fgColor, bgColor Color) {
 	if e.writeLock.isLocked() {
 		return
 	}
+	e.addManualHighlightIgnoreLock(start, end, fgColor, bgColor)
+}
+
+func (e *editableModel) addManualHighlightIgnoreLock(start, end int, fgColor, bgColor Color) {
 	if end <= start {
 		return
 	}
 
-	s := NewSyntaxInterval(start, end, color)
-	for _, m := range e.manualHighlighting {
+	s := NewSyntaxInterval(start, end, fgColor, bgColor)
+	for i, m := range e.manualHighlighting {
+		// TODO: If the interval is the same color as the existing one, replace the existing one with
+		// the union of the two.
 		if intvl.Overlaps(s, m) {
-			return
+			v := intvl.Diff(m, s)
+			e.manualHighlighting[i].start = v.Start()
+			e.manualHighlighting[i].end = v.End()
 		}
 	}
 	e.manualHighlighting = append(e.manualHighlighting, s)
+	e.manualHighlighting = slices.DeleteFunc(e.manualHighlighting, func(n *SyntaxInterval) bool {
+		return intvl.Len(n) == 0
+	})
+}
+
+func (e *editableModel) AddManualHighlights(a []SyntaxInterval) {
+	if e.writeLock.isLocked() {
+		return
+	}
+	for _, v := range a {
+		e.addManualHighlightIgnoreLock(v.start, v.end, v.fgColor, v.bgColor)
+	}
+}
+
+func (e *editableModel) ManualHighlights() []*SyntaxInterval {
+	return e.manualHighlighting
 }
 
 func (e *editableModel) ClearManualHighlights() {
@@ -869,17 +901,35 @@ func (e *editable) cursorIndicesInDisplayOrder() []int {
 	return a
 }
 
-type savedCursorsAndSelections struct {
-	cursors    []int
+type savedCursors struct {
+	cursors []int
+}
+
+type savedSelections struct {
 	selections []*selection
 	primarySel *selection
 }
 
-func (e editable) saveCursorsAndSelections() savedCursorsAndSelections {
-	var saved savedCursorsAndSelections
+func (e editable) saveCursors() savedCursors {
+	var saved savedCursors
 
 	saved.cursors = make([]int, len(e.CursorIndices))
 	copy(saved.cursors, e.CursorIndices)
+
+	return saved
+}
+
+func (e *editable) restoreCursors(saved savedCursors) {
+	for _, c := range saved.cursors {
+		e.CursorIndices = e.CursorIndices[:0]
+		if c <= e.Len() {
+			e.CursorIndices = append(e.CursorIndices, c)
+		}
+	}
+}
+
+func (e editable) saveSelections() savedSelections {
+	var saved savedSelections
 
 	saved.selections = e.copySelections()
 	if e.primarySel != nil {
@@ -893,14 +943,7 @@ func (e editable) saveCursorsAndSelections() savedCursorsAndSelections {
 	return saved
 }
 
-func (e *editable) restoreCursorsAndSelections(saved savedCursorsAndSelections) {
-	for _, c := range saved.cursors {
-		e.CursorIndices = e.CursorIndices[:0]
-		if c <= e.Len() {
-			e.CursorIndices = append(e.CursorIndices, c)
-		}
-	}
-
+func (e *editable) restoreSelections(saved savedSelections) {
 	e.selections = e.selections[:0]
 	for _, s := range saved.selections {
 		if s.start > e.Len() {
@@ -915,6 +958,26 @@ func (e *editable) restoreCursorsAndSelections(saved savedCursorsAndSelections) 
 			e.primarySel = s
 		}
 	}
+}
+
+func (e editable) saveCursorsAndSelections() (savedCursors, savedSelections) {
+	sc := e.saveCursors()
+	ss := e.saveSelections()
+	return sc, ss
+}
+
+func (e *editable) restoreCursorsAndSelections(sc savedCursors, ss savedSelections) {
+	e.restoreCursors(sc)
+	e.restoreSelections(ss)
+}
+
+func (e *editable) textAfterFirstBlankLine() []byte {
+	s := e.Bytes()
+	i := bytes.Index(s, []byte{'\n', '\n'})
+	if i >= 0 {
+		return s[i+1:]
+	}
+	return []byte{}
 }
 
 type readOnlyPieceTable struct {

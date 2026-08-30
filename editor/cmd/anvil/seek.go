@@ -2,10 +2,11 @@ package main
 
 import (
 	"fmt"
-	"github.com/jeffwilliams/anvil/editor/internal/expr"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/jeffwilliams/anvil/editor/internal/expr"
 )
 
 type seek struct {

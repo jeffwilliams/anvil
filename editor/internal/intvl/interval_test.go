@@ -248,3 +248,59 @@ func TestIntervalsWalk(t *testing.T) {
 	}
 
 }
+
+func TestDiff(t *testing.T) {
+	tests := []struct {
+		name     string
+		a, b     simpleInterval
+		expected simpleInterval
+	}{
+		{
+			name:     "non-overlap",
+			a:        simpleInterval{5, 10},
+			b:        simpleInterval{1, 4},
+			expected: simpleInterval{5, 10},
+		},
+		{
+			name:     "non-overlap 2",
+			a:        simpleInterval{5, 10},
+			b:        simpleInterval{1, 5},
+			expected: simpleInterval{5, 10},
+		},
+		{
+			name:     "non-overlap 3",
+			a:        simpleInterval{5, 10},
+			b:        simpleInterval{11, 15},
+			expected: simpleInterval{5, 10},
+		},
+		{
+			name:     "subset",
+			a:        simpleInterval{12, 14},
+			b:        simpleInterval{11, 15},
+			expected: simpleInterval{11, 11},
+		},
+		{
+			name:     "left overlap",
+			a:        simpleInterval{1, 14},
+			b:        simpleInterval{11, 15},
+			expected: simpleInterval{1, 11},
+		},
+		{
+			name:     "right overlap",
+			a:        simpleInterval{13, 20},
+			b:        simpleInterval{11, 15},
+			expected: simpleInterval{15, 20},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Diff(tc.a, tc.b)
+			si := r.(simpleInterval)
+
+			if si != tc.expected {
+				t.Fatalf("Expected %v but got %v", tc.expected, si)
+			}
+		})
+	}
+}

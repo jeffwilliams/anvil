@@ -31,6 +31,7 @@ func usage() {
 
 func main() {
 	parseFlags()
+	log.SetFlags(log.Lmicroseconds)
 
 	config := buildServerConfig()
 
@@ -58,7 +59,6 @@ func parseFlags() {
 	optListenAddr = pflag.StringP("addr", "a", "0.0.0.0:5001", "What address and port to listen on")
 	optAuthKeysFile = pflag.StringP("authkeys", "z", defAuthKeysFile, "file to load authorized keys from")
 	optHostKeyFile = pflag.StringP("hostkey", "k", defHostKeyFile, "file containing host private key")
-
 	pflag.Parse()
 	pflag.Usage = usage
 }
@@ -233,7 +233,7 @@ func processNewChannel(newChannel ssh.NewChannel) {
 
 	cmd.Stdin = channel
 	cmd.Stdout = channel
-	cmd.Stderr = channel
+	cmd.Stderr = channel.Stderr()
 	// Set the tree of processes we create to all have the same PGID, so that
 	// we can kill the PGID to kill all processes
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

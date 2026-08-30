@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"time"
 	"unicode/utf8"
 
@@ -15,11 +17,14 @@ import (
 
 type SyntaxInterval struct {
 	start, end int
-	color      Color
+	// If fgColor.A is zero, it is considered unset
+	fgColor Color
+	// If bgColor.A is zero, it is considered unset
+	bgColor Color
 }
 
-func NewSyntaxInterval(start, end int, color Color) *SyntaxInterval {
-	return &SyntaxInterval{start, end, color}
+func NewSyntaxInterval(start, end int, fgColor, bgColor Color) *SyntaxInterval {
+	return &SyntaxInterval{start, end, fgColor, bgColor}
 }
 
 func (s SyntaxInterval) Start() int {
@@ -30,8 +35,36 @@ func (s SyntaxInterval) End() int {
 	return s.end
 }
 
-func (s SyntaxInterval) Color() Color {
-	return s.color
+func (s SyntaxInterval) FgColorSet() bool {
+	return s.fgColor.A > 0
+}
+
+func (s SyntaxInterval) BgColorSet() bool {
+	return s.bgColor.A > 0
+}
+
+func (s SyntaxInterval) FgColor() Color {
+	return s.fgColor
+}
+
+func (s SyntaxInterval) BgColor() Color {
+	return s.bgColor
+}
+
+func (s SyntaxInterval) Tint() string {
+	var buf bytes.Buffer
+
+	if s.FgColorSet() {
+		buf.WriteString(ToHexColor(s.fgColor))
+	}
+
+	buf.WriteRune('/')
+
+	if s.BgColorSet() {
+		buf.WriteString(ToHexColor(s.bgColor))
+	}
+
+	return buf.String()
 }
 
 func NewSyntaxHighlighter(style SyntaxStyle) Highlighter {
@@ -170,9 +203,9 @@ LOOP:
 		}
 
 		si := &SyntaxInterval{
-			start: runeIndex,
-			end:   runeIndex + tokLen,
-			color: *color,
+			start:   runeIndex,
+			end:     runeIndex + tokLen,
+			fgColor: *color,
 		}
 		seq = append(seq, si)
 
@@ -312,9 +345,9 @@ LOOP:
 		}
 
 		si := &SyntaxInterval{
-			start: tok.Start,
-			end:   tok.End,
-			color: *color,
+			start:   tok.Start,
+			end:     tok.End,
+			fgColor: *color,
 		}
 		seq = append(seq, si)
 	}
@@ -422,4 +455,20 @@ func printSyntaxLexerParseErrors() {
 			fmt.Printf("  * %v\n", e)
 		}
 	}
+}
+
+func LoadLexerFromFile(file string) error {
+	// https://github.com/jeffwilliams/syn/blob/master/lexers/lexers.go
+	f, err := os.Open(file)
+	if err != nil {
+		return err
+	}
+
+	lex, err := syn.NewLexerFromXML(f)
+	if err != nil {
+		return err
+	}
+
+	synlexers.GlobalLexerRegistry.Register(lex)
+	return nil
 }

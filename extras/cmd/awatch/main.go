@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jeffwilliams/anvil/api/go/anvil"
 	"github.com/ogier/pflag"
@@ -162,11 +163,6 @@ func handlePutNotification(notif *anvil.Notification, err error) {
 	runCmdsAndUpdateWindow()
 }
 
-func runCmdsAndUpdateWindow() {
-	output := runCmds()
-	httpApi.Put(fmt.Sprintf("/wins/%d/body", watchWin.Id), output)
-}
-
 // updateCmdsFromWindow reads all the lines from the window body that begin with '% ' and
 // treat them as commands to run.
 func updateCmdsFromWindow() {
@@ -186,18 +182,202 @@ func updateCmdsFromWindow() {
 	}
 }
 
-func runCmds() (output *bytes.Buffer) {
-	buf := new(bytes.Buffer)
+func runCmdsAndUpdateWindow() {
+	debug("awatch: running commands\n")
+	outputChans := make([]chan []byte, len(cmds))
 
-	for _, c := range cmds {
-		fmt.Fprintf(buf, "%% %s\n", c)
-		debug("awatch: running command: %s\n", c)
-		output, err := run(c)
+	for i, cmd := range cmds {
+		var err error
+		debug("awatch: starting %s\n", cmd)
+		outputChans[i], err = startCommandAndSendOutput(cmd)
+		debug("awatch: started %s\n", cmd)
 		if err != nil {
-			fmt.Fprintf(buf, "(execution error: %v)\n", err)
+			writeErrorToChanAndClose(err, outputChans[i])
 		}
-		buf.Write(output)
 	}
 
-	return buf
+	outputBufs := make([]bytes.Buffer, len(cmds))
+
+	var appender appender
+	allClosed := false
+	for !allClosed {
+		time.Sleep(100 * time.Millisecond)
+		lensBefore := calcLenOfBufs(outputBufs)
+		allClosed = appender.appendAvailableOutputsInto(outputChans, outputBufs)
+		lensAfter := calcLenOfBufs(outputBufs)
+		if lensBefore.equal(lensAfter) {
+			// no change in output. don't send to Anvil
+			continue
+		}
+		contents := buildWindowContents(outputBufs)
+		httpApi.Put(fmt.Sprintf("/wins/%d/body", watchWin.Id), contents)
+	}
+
+	debug("awatch: outputs all closed\n")
+
+	return
+}
+
+func writeErrorToChanAndClose(err error, ch chan []byte) {
+	ch <- []byte(err.Error())
+	close(ch)
+}
+
+func startCommandAndSendOutput(cmd string) (ch chan []byte, err error) {
+	ch = make(chan []byte)
+	var stdout io.Reader
+	var stderr io.Reader
+
+	c := newCmd(cmd)
+
+	stdout, err = c.StdoutPipe()
+	if err != nil {
+		return
+	}
+	stderr, err = c.StderrPipe()
+	if err != nil {
+		return
+	}
+
+	err = c.Start()
+	if err != nil {
+		return
+	}
+
+	c1, c2 := mergeContentsInto(ch)
+	go copyBlocks(stdout, c1, 1024)
+	go copyBlocks(stderr, c2, 1024)
+	return
+}
+
+func copyBlocks(source io.Reader, dest chan []byte, blocksize int) {
+	defer close(dest)
+
+	count := 0
+	updateBlockSize := func() {
+		if blocksize >= 1048576 {
+			return
+		}
+
+		if count < 50 {
+			count++
+			return
+		}
+
+		blocksize = 1048576
+	}
+
+	for {
+		block := make([]byte, blocksize)
+		n, err := source.Read(block)
+
+		if err != nil {
+			if err != io.EOF {
+				dest <- []byte(err.Error())
+			}
+			break
+		}
+
+		if n == 0 {
+			continue
+		}
+
+		b := block
+		if n < len(block) {
+			b = block[:n]
+		}
+		dest <- b
+
+		updateBlockSize()
+	}
+
+}
+
+func mergeContentsInto(dest chan []byte) (c1, c2 chan []byte) {
+	c1 = make(chan []byte)
+	c2 = make(chan []byte)
+
+	go func() {
+		var eofs [2]bool
+		for !(eofs[0] && eofs[1]) {
+			select {
+			case b, ok := <-c1:
+				if !ok {
+					eofs[0] = true
+					c1 = nil
+					continue
+				}
+				dest <- b
+			case b, ok := <-c2:
+				if !ok {
+					eofs[1] = true
+					c2 = nil
+					continue
+				}
+				dest <- b
+			}
+		}
+		close(dest)
+	}()
+	return
+}
+
+type appender struct {
+	closed []bool
+}
+
+func (a *appender) appendAvailableOutputsInto(outputs []chan []byte, bufs []bytes.Buffer) (allClosed bool) {
+	if a.closed == nil {
+		a.closed = make([]bool, len(outputs))
+	}
+
+	for i, o := range outputs {
+		select {
+		case b, ok := <-o:
+			if !ok {
+				a.closed[i] = true
+				break
+			}
+			bufs[i].Write(b)
+		default:
+		}
+	}
+
+	for _, b := range a.closed {
+		if !b {
+			return false
+		}
+	}
+
+	return true
+}
+
+func buildWindowContents(outputs []bytes.Buffer) (contents *bytes.Buffer) {
+	contents = new(bytes.Buffer)
+
+	for i, c := range cmds {
+		fmt.Fprintf(contents, "%% %s\n", c)
+		contents.Write(outputs[i].Bytes())
+	}
+
+	return
+}
+
+type lenOfBufs []int
+
+func (l lenOfBufs) equal(o lenOfBufs) bool {
+	for i, v := range l {
+		if v != o[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func calcLenOfBufs(bufs []bytes.Buffer) lenOfBufs {
+	l := make(lenOfBufs, len(bufs))
+	for i, b := range bufs {
+		l[i] = b.Len()
+	}
+	return l
 }

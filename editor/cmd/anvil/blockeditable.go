@@ -28,11 +28,14 @@ import (
 // blockEditable is an editable that is displayed as a block with a background
 type blockEditable struct {
 	editable
-	dims     layout.Dimensions
-	style    blockStyle
-	maximize bool
-	bgcolor  color.NRGBA
-	bgimage  backgroundImage
+	dims    layout.Dimensions
+	style   blockStyle
+	bgcolor color.NRGBA
+	bgimage backgroundImage
+	// dimensionBehaviours controls whether the blockEditable grows to fill
+	// the space available to it, or whether it shrinks so that it only contains
+	// the text.
+	dimensionBehaviours dimensionBehaviours
 }
 
 type blockStyle struct {
@@ -46,6 +49,17 @@ type blockStyle struct {
 	ErrorsPathBasenameColor      color.NRGBA
 	ErrorsFlashPathBasenameColor color.NRGBA
 }
+
+type dimensionBehaviours struct {
+	width, height dimensionBehaviour
+}
+
+type dimensionBehaviour int
+
+const (
+	contract = iota
+	expand
+)
 
 func (t *blockEditable) Init(style blockStyle, editableStyle editableStyle, scheduler *Scheduler) {
 	t.style = style
@@ -113,7 +127,7 @@ func (t *blockEditable) handleEvent(gtx layout.Context, ev event.Event) {
 	case key.Event:
 		t.Key(gtx, &e)
 	case key.EditEvent:
-		t.InsertText(e.Text)
+		t.InsertTextAndHandleKeys(gtx, e.Text)
 	case key.FocusEvent:
 		/*action := "set to"
 		  if !e.Focus {
@@ -167,15 +181,49 @@ func (t *blockEditable) listenForEvents(gtx layout.Context) {
 }
 
 func (t *blockEditable) draw(gtx layout.Context) layout.Dimensions {
-	if t.maximize {
+	if t.dimensionBehaviours.width == expand && t.dimensionBehaviours.height == expand {
 		return t.drawMaximized(gtx)
-	} else {
-		return t.drawTight(gtx)
 	}
+
+	// We don't know how many lines the editable is (how big it is) until we draw it, but we also
+	// want to fill the background before drawing the editable. To fill the background we need to know
+	// how big it is. So we draw it but record the drawing operations into a macro instead of performing
+	// them, then we fill the background and replay the macro.
+	macro := op.Record(gtx.Ops)
+	textDims := t.editable.draw(gtx)
+
+	minHeight := t.editable.layouter.lineHeight()
+	if minHeight > 0 && textDims.Size.Y < minHeight {
+		textDims.Size.Y = minHeight
+	}
+	c := macro.Stop()
+
+	blockDims := t.dimensionsConstraints(gtx, textDims)
+	r := clip.Rect{Max: blockDims}
+	stack := r.Push(gtx.Ops)
+	defer stack.Pop()
+	t.drawBackground(gtx)
+
+	c.Add(gtx.Ops)
+
+	return layout.Dimensions{Size: blockDims}
+}
+
+func (t *blockEditable) dimensionsConstraints(gtx layout.Context, dims layout.Dimensions) (pt image.Point) {
+	pt.X = gtx.Constraints.Max.X
+	pt.Y = gtx.Constraints.Max.Y
+	if t.dimensionBehaviours.width == contract {
+		pt.X = dims.Size.X
+	}
+	if t.dimensionBehaviours.height == contract {
+		pt.Y = dims.Size.Y
+	}
+	return
 }
 
 func (t *blockEditable) drawMaximized(gtx layout.Context) layout.Dimensions {
 	r := clip.Rect{Max: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Max.Y)}
+
 	stack := r.Push(gtx.Ops)
 	defer stack.Pop()
 	t.drawBackground(gtx)
@@ -238,7 +286,7 @@ func (t *blockEditable) drawTight(gtx layout.Context) layout.Dimensions {
 
 	c.Add(gtx.Ops)
 
-	return layout.Dimensions{Size: image.Point{X: gtx.Constraints.Max.X, Y: dims.Size.Y}}
+	return layout.Dimensions{Size: image.Point{X: dims.Size.X, Y: dims.Size.Y}}
 }
 
 func fixLineEndings(s string) string {

@@ -1,0 +1,77 @@
+{
+  "Fonts": [
+    {
+      "FontName": "defaultVariableFont",
+      "FontSize": 12
+    },
+    {
+      "FontName": "defaultMonoFont",
+      "FontSize": 12
+    }
+  ],
+"TagFgColor": "#ffffff",
+"TagBgColor": "#357ec7",
+"TagPathBasenameColor": "#ffffff",
+"BodyFgColor": "#1c1c1c",
+"BodyBgColor": "#ffffff",
+"LayoutBoxFgColor": "#256eb7",
+"LayoutBoxUnsavedBgColor": "#fff3a8",
+"LayoutBoxBgColor": "#75beff",
+"ScrollFgColor": "#b3b3b3",
+"ScrollBgColor": "#f6f6f6",
+"GutterWidth": 12,
+"WinBorderColor": "#256eb7",
+"WinBorderWidth": 1,
+"PrimarySelectionFgColor": "#000000",
+"PrimarySelectionBgColor": "#fff3a8",
+"SecondarySelectionFgColor": "#ffffff",
+"SecondarySelectionBgColor": "#000082",
+"ErrorsTagFgColor": "#ffffff",
+"ErrorsTagPathBasenameColor": "#ffffff",
+"ErrorsTagBgColor": "#c43d21",
+"ErrorsTagFlashFgColor": "#ffffff",
+"ErrorsTagFlashPathBasenameColor": "#ffffff",
+"ErrorsTagFlashBgColor": "#c43d21",
+"TrayFgColor": "#ffffff",
+"TrayBgColor": "#357ec7",
+"TrayInnerBorderColor": "#256eb7",
+"TrayInnerBorderWidth": 1,
+"TrayOuterBorderColor": "#f6f6f6",
+"TrayOuterBorderWidth": 1,
+"TabStopInterval": 30,
+"Syntax": {
+  "KeywordColor": "#0048ff",
+  "NameColor": "#000000",
+  "StringColor": "#000082",
+  "NumberColor": "#000082",
+  "OperatorColor": "#000000",
+  "CommentColor": "#478c23",
+  "PreprocessorColor": "#000000",
+  "HeadingColor": "#0048ff",
+  "SubheadingColor": "#000082",
+  "InsertedColor": "#478c23",
+  "DeletedColor": "#c43d21"
+},
+  "Ansi": {
+    "Colors": [
+      "#000000",
+      "#c43d21",
+      "#f3b63c",
+      "#fff3a8",
+      "#478C23",
+      "#0048ff",
+      "#000082",
+      "#357ec7",
+      "#545454",
+      "#b3b3b3",
+      "#dfdfdf",
+      "#f6f6f6",
+      "#ffffff",
+      "#64ffff",
+      "#ff64ff",
+      "#00ffff"
+    ]
+  },
+"LineSpacing": 0,
+"TextLeftPadding": 3
+}

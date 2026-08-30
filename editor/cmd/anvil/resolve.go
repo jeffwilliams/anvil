@@ -75,7 +75,7 @@ func NewPathCompleterForWindowOmitWinPath(w *Window) *PathCompleter {
 		return NewPathCompleterWithType(pathCompleterForWindow)
 	}
 
-	if winPath.IsRemote() {
+	if winPath.IsRemote() && !colPath.IsRemote() {
 		return NewPathCompleterWithType(pathCompleterForWindow, winPath, colPath)
 	}
 

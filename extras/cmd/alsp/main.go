@@ -22,8 +22,8 @@ var (
 
 func main() {
 	cmd := &cli.Command{
-		Name:  "aclangd",
-		Usage: "use clangd from Anvil",
+		Name:  "lspd",
+		Usage: "use an LSP from Anvil",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			if cmd.Bool("debug") {
 				optDebug = true
@@ -37,28 +37,10 @@ func main() {
 				workspace = wd
 			}
 
-			level := clangLogLevelError
-			if optDebug {
-				level = clangLogLevelVerbose
-			}
-			s := cmd.String("clang-log-level")
-			switch s {
-			case "verbose":
-				level = clangLogLevelVerbose
-			case "error":
-				level = clangLogLevelError
-			case "info":
-				level = clangLogLevelInfo
-			}
-			debug("Setting clang log level to %s\n", level)
-
-			opts := newClangdOpts()
-			opts.logLevel = level
-			if s = cmd.String("clangd-path"); s != "" {
-				opts.clangdPath = s
-			}
-
-			runAnvilServer(workspace, opts)
+			var err error
+			lspConn, err = initLspServer(cmd) //Lsp{conn}
+			dieIfError(err, "Starting LSP server failed")
+			runAnvilServer(workspace)
 			return nil
 		},
 		Flags: []cli.Flag{
@@ -78,9 +60,19 @@ func main() {
 				Usage:   "Root directory of workspace",
 			},
 			&cli.StringFlag{
-				Name:    "clangd-path",
+				Name:    "lsp",
+				Aliases: []string{"s"},
+				Usage:   "Name of the lsp to start. One of clangd, gopls.",
+			},
+			&cli.StringFlag{
+				Name:    "lsp-path",
 				Aliases: []string{"c"},
 				Usage:   "Full path to the clangd binary to execute",
+			},
+			&cli.StringFlag{
+				Name:    "compile-commands-dir",
+				Aliases: []string{"m"},
+				Usage:   "Path to the directory containing compile-commands.json",
 			},
 		},
 		Commands: []*cli.Command{
@@ -162,17 +154,108 @@ func cliCommandGen(ctx context.Context, cmd *cli.Command) error {
 	return nil
 }
 
-func runAnvilServer(workspace string, opts clangdOpts) {
-	connectToAnvil()
-	err := anvilHttpApi.RegisterCommands("L")
-	dieIfError(err, "Registering L command failed")
+func initLspServer(cmd *cli.Command) (lsp Lsp, err error) {
+	lspName := cmd.String("lsp")
+	if lspName == "" {
+		err = fmt.Errorf("The --lsp argument is mandatory\n")
+		return
+	}
 
-	conn, err := initClang(opts)
-	lspConn = Lsp{conn}
-	dieIfError(err, "Starting clangd failed")
+	var cmdOpts lspCmdOpts
+
+	if s := cmd.String("lsp-path"); s != "" {
+		cmdOpts.lspCmdPath = s
+	}
+
+	switch lspName {
+	case "clangd":
+		return initClangdUsingCliFlags(cmdOpts, cmd)
+	case "gopls":
+		return initGoplsUsingCliFlags(cmdOpts, cmd)
+	default:
+		err = fmt.Errorf("Unknown lsp %s\n", lspName)
+		return
+	}
+
+	return
+	//	level := clangLogLevelError
+	//	if optDebug {
+	//		level = clangLogLevelVerbose
+	//	}
+	//	s := cmd.String("clang-log-level")
+	//	switch s {
+	//	case "verbose":
+	//		level = clangLogLevelVerbose
+	//	case "error":
+	//		level = clangLogLevelError
+	//	case "info":
+	//		level = clangLogLevelInfo
+	//	}
+	//	debug("Setting clang log level to %s\n", level)
+	//
+	// opts := newClangdOpts()
+	//
+	//	opts.logLevel = level
+	//	if s = cmd.String("compile-commands-dir"); s != "" {
+	//		opts.compileCommandsDir = s
+	//	}
+	//
+	//	conn, err := initClangd(opts)
+	//	lspConn = Lsp{conn}
+	//	dieIfError(err, "Starting LSP server failed")
+}
+
+func initClangdUsingCliFlags(cmdOpts lspCmdOpts, cmd *cli.Command) (lsp Lsp, err error) {
+	if cmdOpts.lspCmdPath == "" {
+		cmdOpts.lspCmdPath = "clangd"
+	}
+
+	level := clangLogLevelError
+	if optDebug {
+		level = clangLogLevelVerbose
+	}
+	s := cmd.String("clang-log-level")
+	switch s {
+	case "verbose":
+		level = clangLogLevelVerbose
+	case "error":
+		level = clangLogLevelError
+	case "info":
+		level = clangLogLevelInfo
+	}
+	debug("Setting clang log level to %s\n", level)
+	opts := newClangdOpts()
+	opts.logLevel = level
+	if s = cmd.String("compile-commands-dir"); s != "" {
+		opts.compileCommandsDir = s
+	}
+
+	conn, err := initClangd(cmdOpts, opts)
+	lsp = Lsp{conn}
+	return
+}
+
+func initGoplsUsingCliFlags(cmdOpts lspCmdOpts, cmd *cli.Command) (lsp Lsp, err error) {
+	if cmdOpts.lspCmdPath == "" {
+		cmdOpts.lspCmdPath = "gopls"
+	}
+
+	conn, err := initGopls(cmdOpts)
+	lsp = Lsp{conn}
+	return
+}
+
+func runAnvilServer(workspace string) {
+	connectToAnvil()
+	err := anvilHttpApi.RegisterCommands("Lhelp", "Ldef", "Ldecl", "Lrefs", "Lhov")
+	dieIfError(err, "Registering Anvil command failed")
+
+	//	conn, err := initClangd(opts)
+	//	lspConn = Lsp{conn}
+	//	dieIfError(err, "Starting LSP server failed")
 
 	err = lspConn.Init(workspace)
-	dieIfError(err, "Initializing clangd failed")
+	dieIfError(err, "Initializing LSP server failed")
 
 	notifyOpenAnvilDocs()
 
@@ -189,7 +272,7 @@ func cliCommandDemo(ctx context.Context, cmd *cli.Command) error {
 		os.Exit(1)
 	}
 
-	client, err := initClang(newClangdOpts())
+	client, err := initClangd(lspCmdOpts{}, newClangdOpts())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

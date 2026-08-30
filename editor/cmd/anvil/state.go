@@ -19,6 +19,7 @@ type ApplicationState struct {
 	WinIdGenState    *IdGenState
 	CommandHistory   *CommandHistoryState
 	WorkingDirectory string
+	Trays            []TrayState
 }
 
 func (a *Application) State() *ApplicationState {
@@ -33,6 +34,7 @@ func (a *Application) State() *ApplicationState {
 		WinIdGenState:    a.WinIdGenerator().State(),
 		CommandHistory:   cmdHistory.State(),
 		WorkingDirectory: wd,
+		Trays:            sessionScopedTrays.State(),
 	}
 
 	if a.winConfig != nil {
@@ -70,32 +72,36 @@ func (a *Application) SetState(state *ApplicationState) error {
 	h := NewCommandHistory(cmdHistory.max)
 	h.SetState(state.CommandHistory)
 	cmdHistory = cmdHistory.Merge(h)
+
+	sessionScopedTrays.SetState(state.Trays)
 	return nil
 }
 
 type EditorState struct {
-	Tag         *TagState
-	Cols        []*ColState
-	RecentFiles []string
-	Marks       MarkState
+	Tag              *TagState
+	Layers           []*LayerState
+	ActiveLayerIndex int
+	RecentFiles      []string
+	Marks            MarkState
 }
 
 func (e *Editor) State() *EditorState {
 	edTag := e.Tag.State()
 
-	var cols []*ColState
-	for _, c := range e.Cols {
-		cols = append(cols, c.State())
+	var layers []*LayerState
+	for _, l := range e.Layers {
+		layers = append(layers, l.State())
 	}
 
 	// Remove any running jobs, since they won't be running after load.
 	edTag.Text = e.removeJobsFromTag(edTag.Text)
 
 	return &EditorState{
-		Tag:         edTag,
-		Cols:        cols,
-		RecentFiles: editor.recentFiles.All(),
-		Marks:       editor.Marks.State(),
+		Tag:              edTag,
+		Layers:           layers,
+		ActiveLayerIndex: editor.activeLayerIndex,
+		RecentFiles:      editor.recentFiles.All(),
+		Marks:            editor.Marks.State(),
 	}
 
 	//e.focusedEditable
@@ -123,20 +129,16 @@ func (e *Editor) SetState(state *EditorState) error {
 	editor.addJobsToTag()
 
 	// Remove all columns
-	editor.Clear()
+	//editor.Clear()
 
-	anyVisible := false
-	for _, c := range state.Cols {
-		col := editor.NewColDontPosition()
-		col.SetState(c)
-		if col.Visible() {
-			anyVisible = true
-		}
+	editor.Layers = nil
+	for _, layerState := range state.Layers {
+		layer := editor.NewLayer()
+		layer.SetState(layerState)
+		editor.Layers = append(editor.Layers, layer)
 	}
-	if !anyVisible && len(editor.Cols) > 0 {
-		editor.Cols[0].SetVisible(true)
-		editor.ensureFirstVisibleColIsLeftJustified()
-	}
+
+	editor.activeLayerIndex = state.ActiveLayerIndex
 
 	for _, f := range state.RecentFiles {
 		editor.AddRecentFile(f)
@@ -163,11 +165,68 @@ func (t *Tag) SetState(s *TagState) error {
 	return nil
 }
 
+type LayerState struct {
+	Name           string
+	Cols           []*ColState
+	VisibleCols    []VisibleColState
+	LeftVisibleCol int
+}
+
+type VisibleColState struct {
+	LeftX    int
+	ColIndex int
+}
+
+func (l *Layer) State() *LayerState {
+	var cols []*ColState
+	for _, c := range l.Cols {
+		cols = append(cols, c.State())
+	}
+
+	visibleCols := make([]VisibleColState, len(l.visibleCols))
+	for i, c := range l.visibleCols {
+		visibleCols[i].LeftX = c.leftX
+		visibleCols[i].ColIndex = c.col.layedOutColIndex
+	}
+
+	return &LayerState{
+		Name:           l.Name,
+		Cols:           cols,
+		VisibleCols:    visibleCols,
+		LeftVisibleCol: l.leftVisibleCol,
+	}
+}
+
+func (layer *Layer) SetState(state *LayerState) error {
+	if state == nil {
+		return fmt.Errorf("The layer state is nil")
+	}
+
+	layer.Name = state.Name
+
+	// Remove all columns
+	layer.Clear()
+
+	for _, c := range state.Cols {
+		col := layer.NewColDontPosition()
+		col.SetState(c)
+	}
+
+	layer.leftVisibleCol = state.LeftVisibleCol
+
+	layer.visibleCols = make([]colPosition, len(state.VisibleCols))
+	for i, x := range state.VisibleCols {
+		layer.visibleCols[i].leftX = x.LeftX
+		layer.visibleCols[i].col = layer.Cols[x.ColIndex]
+	}
+
+	return nil
+}
+
 type ColState struct {
-	Tag     *TagState
-	LeftX   int
-	Windows []*WindowState
-	Visible bool
+	Tag              *TagState
+	LayedOutColIndex int
+	Windows          []*WindowState
 }
 
 func (c *Col) State() *ColState {
@@ -178,10 +237,9 @@ func (c *Col) State() *ColState {
 	}
 
 	return &ColState{
-		Tag:     c.Tag.State(),
-		LeftX:   c.LeftX,
-		Windows: wins,
-		Visible: c.visible,
+		Tag:              c.Tag.State(),
+		LayedOutColIndex: c.layedOutColIndex,
+		Windows:          wins,
 	}
 }
 
@@ -190,8 +248,7 @@ func (c *Col) SetState(state *ColState) error {
 		return fmt.Errorf("The column state is nil")
 	}
 	c.Tag.SetState(state.Tag)
-	c.LeftX = state.LeftX
-	c.visible = state.Visible
+	c.layedOutColIndex = state.LayedOutColIndex
 
 	for _, w := range state.Windows {
 		win := c.NewWindowDontPosition()
@@ -201,20 +258,23 @@ func (c *Col) SetState(state *ColState) error {
 }
 
 type WindowState struct {
-	Tag                *TagState
-	TopY               int
-	Body               *BodyState
-	DisplayPath        string
-	LoadPath           string
-	FileType           fileType
-	Id                 int
-	CloneIds           []int
-	ManualHighlighting []ManualHighlightingInterval
+	Tag                  *TagState
+	TopY                 int
+	Body                 *BodyState
+	DisplayPath          string
+	LoadPath             string
+	FileType             fileType
+	Id                   int
+	CloneIds             []int
+	ManualHighlighting   []ManualHighlightingInterval
+	InsertWhenTabPressed string
+	PinnedToLayer        bool
 }
 
 type ManualHighlightingInterval struct {
 	Start, End int
-	Color      Color
+	FgColor    Color
+	BgColor    Color
 }
 
 func (w *Window) State() *WindowState {
@@ -234,19 +294,22 @@ func (w *Window) State() *WindowState {
 	for i, v := range w.Body.manualHighlighting {
 		manualHighlighting[i].Start = v.start
 		manualHighlighting[i].End = v.end
-		manualHighlighting[i].Color = v.color
+		manualHighlighting[i].FgColor = v.fgColor
+		manualHighlighting[i].BgColor = v.bgColor
 	}
 
 	return &WindowState{
-		Tag:                w.Tag.State(),
-		TopY:               w.TopY,
-		Body:               w.Body.State(attemptSavingContents),
-		DisplayPath:        w.displayPath.String(),
-		LoadPath:           w.loadPath.String(),
-		FileType:           w.fileType,
-		Id:                 w.Id,
-		CloneIds:           cloneIds,
-		ManualHighlighting: manualHighlighting,
+		Tag:                  w.Tag.State(),
+		TopY:                 w.TopY,
+		Body:                 w.Body.State(attemptSavingContents),
+		DisplayPath:          w.displayPath.String(),
+		LoadPath:             w.loadPath.String(),
+		FileType:             w.fileType,
+		Id:                   w.Id,
+		CloneIds:             cloneIds,
+		ManualHighlighting:   manualHighlighting,
+		InsertWhenTabPressed: w.insertWhenTabPressed,
+		PinnedToLayer:        w.IsPinnedToCurrentLayer(),
 	}
 }
 
@@ -267,11 +330,12 @@ func (w *Window) SetState(state *WindowState) error {
 
 	w.Body.manualHighlighting = make([]*SyntaxInterval, len(state.ManualHighlighting))
 	for i, v := range state.ManualHighlighting {
-		w.Body.manualHighlighting[i] = NewSyntaxInterval(v.Start, v.End, v.Color)
+		w.Body.manualHighlighting[i] = NewSyntaxInterval(v.Start, v.End, v.FgColor, v.BgColor)
 	}
 
 	application.WinIdGenerator().Free(w.Id)
 	w.Id = state.Id
+	w.insertWhenTabPressed = state.InsertWhenTabPressed
 
 	// The clone we are searching for may not have been loaded yet.
 	// But as we load more windows from the state dump we will eventually
@@ -284,6 +348,8 @@ func (w *Window) SetState(state *WindowState) error {
 			w.Body.text = clone.Body.text
 		}
 	}
+
+	w.SetPinnedToCurrentLayer(state.PinnedToLayer)
 
 	return nil
 }
@@ -443,5 +509,29 @@ func (c *CommandHistory) SetState(state *CommandHistoryState) {
 		}
 
 		c.cmds.Add(e)
+	}
+}
+
+type TrayState struct {
+	Name string
+	Text string
+}
+
+func (r *Trays) State() []TrayState {
+	state := []TrayState{}
+	for k, f := range r.floats {
+		state = append(state, TrayState{k, f.content.String()})
+	}
+
+	return state
+}
+
+func (r *Trays) SetState(state []TrayState) {
+	if state == nil {
+		return
+	}
+
+	for _, rs := range state {
+		r.add(rs.Name, rs.Text)
 	}
 }

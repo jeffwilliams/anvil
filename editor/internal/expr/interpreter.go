@@ -14,16 +14,19 @@ import (
 	"github.com/jeffwilliams/anvil/editor/internal/runes"
 )
 
+var RuneOffsetCacheInterval int = 8000
+
 type Interpreter struct {
-	tree     interface{}
-	pipeline []stage
-	data     []byte
-	handler  Handler
-	dot      int
+	tree            interface{}
+	pipeline        []stage
+	data            []byte
+	runeOffsetCache runes.OffsetCache
+	handler         Handler
+	dot             int
 }
 
 func NewInterpreter(data []byte, parseTree interface{}, handler Handler, dot int) (Interpreter, error) {
-	in := Interpreter{data: data, tree: parseTree, handler: handler, dot: dot}
+	in := Interpreter{data: data, runeOffsetCache: runes.NewOffsetCache(RuneOffsetCacheInterval), tree: parseTree, handler: handler, dot: dot}
 	err := in.buildPipeline()
 	return in, err
 }
@@ -100,7 +103,7 @@ func (in *Interpreter) execute(ranges []Range) error {
 	var err error
 	for i, stage := range in.pipeline {
 		var err2 error
-		ranges, err2 = stage.Execute(&in.data, ranges)
+		ranges, err2 = stage.Execute(&in.data, &in.runeOffsetCache, ranges)
 		dbg("Interpreter.Execute: after executing stage %d (%T) ranges are: %s", i, stage, rangesToString(ranges))
 		if err2 != nil {
 			err = err2
@@ -119,21 +122,23 @@ type Range interface {
 type stage interface {
 	// A stage takes a set of ranges as input, and returns a new modified
 	// set of ranges.
-	Execute(data *[]byte, ranges []Range) ([]Range, error)
+	Execute(data *[]byte, runeOffsetCache *runes.OffsetCache, ranges []Range) ([]Range, error)
 }
 
 type addrStage struct {
-	addrTree interface{}
-	data     []byte
-	dot      int
+	addrTree        interface{}
+	data            []byte
+	dot             int
+	runeOffsetCache *runes.OffsetCache
 }
 
 func newAddrStage(addrTree interface{}, dot int) addrStage {
 	return addrStage{addrTree: addrTree, dot: dot}
 }
 
-func (s addrStage) Execute(data *[]byte, ranges []Range) ([]Range, error) {
+func (s addrStage) Execute(data *[]byte, runeOffsetCache *runes.OffsetCache, ranges []Range) ([]Range, error) {
 	s.data = *data
+	s.runeOffsetCache = runeOffsetCache
 	result := []Range{}
 
 	for _, r := range ranges {
@@ -197,7 +202,7 @@ func (s *addrStage) executeLineAddr(addr simpleAddr, r Range) Range {
 		return &irange{r.Start(), r.Start()}
 	}
 	walker := runes.NewWalker(s.data)
-	walker.SetRunePos(r.Start())
+	walker.SetRunePosCache(r.Start(), s.runeOffsetCache)
 	eof := walker.ForwardLines(val)
 	if eof {
 		// Out of range
@@ -227,7 +232,7 @@ func (s *addrStage) executeCharAddr(addr simpleAddr, r Range) Range {
 	}
 
 	walker := runes.NewWalker(s.data)
-	walker.SetRunePos(r.Start())
+	walker.SetRunePosCache(r.Start(), s.runeOffsetCache)
 	walker.Forward(val)
 	start := walker.RunePos()
 	return &irange{start, start + 1}
@@ -250,7 +255,7 @@ func (s *addrStage) executeRegexpAddr(addr simpleAddr, r Range, dir readDirectio
 	}
 
 	walker := runes.NewWalker(s.data)
-	data := walker.TextBetweenRuneIndices(r.Start(), r.End())
+	data := walker.TextBetweenRuneIndicesCache(r.Start(), r.End(), s.runeOffsetCache)
 
 	var match []int
 	if dir == forwardDir {
@@ -267,7 +272,7 @@ func (s *addrStage) executeRegexpAddr(addr simpleAddr, r Range, dir readDirectio
 		return &irange{}
 	}
 
-	convertRegexMatchIndicesToRuneRanges(s.data, r.Start(), [][]int{match})
+	convertRegexMatchIndicesToRuneRanges(s.data, s.runeOffsetCache, r.Start(), [][]int{match})
 	return &irange{match[0], match[1]}
 }
 
@@ -336,9 +341,10 @@ func (s *addrStage) executeComplexAddr(addr complexAddr, r Range) (result Range)
 }
 
 type operationStage struct {
-	op   operation
-	re   *regexp.Regexp
-	data []byte
+	op              operation
+	re              *regexp.Regexp
+	data            []byte
+	runeOffsetCache *runes.OffsetCache
 }
 
 func newOperationStage(op operation) (stage operationStage, err error) {
@@ -356,8 +362,9 @@ func newOperationStage(op operation) (stage operationStage, err error) {
 	return
 }
 
-func (s operationStage) Execute(data *[]byte, ranges []Range) ([]Range, error) {
+func (s operationStage) Execute(data *[]byte, runeOffsetCache *runes.OffsetCache, ranges []Range) ([]Range, error) {
 	s.data = *data
+	s.runeOffsetCache = runeOffsetCache
 	result := []Range{}
 	for _, r := range ranges {
 		rs := s.execute(r)
@@ -415,11 +422,11 @@ func (s *operationStage) executeZ(rg Range) []Range {
 
 func (s *operationStage) executeXOrYOrZ(rg Range, op rune) []Range {
 	walker := runes.NewWalker(s.data)
-	data := walker.TextBetweenRuneIndices(rg.Start(), rg.End())
+	data := walker.TextBetweenRuneIndicesCache(rg.Start(), rg.End(), s.runeOffsetCache)
 
 	indices := s.re.FindAllIndex(data, -1)
 
-	convertRegexMatchIndicesToRuneRanges(s.data, rg.Start(), indices)
+	convertRegexMatchIndicesToRuneRanges(s.data, s.runeOffsetCache, rg.Start(), indices)
 
 	ranges := make([]Range, len(indices))
 	for i := range indices {
@@ -441,9 +448,9 @@ func (s *operationStage) executeXOrYOrZ(rg Range, op rune) []Range {
 // regex ranges apply to. The regex matches ranges are passed in the parameter match.
 //
 // The indexes in the match are updated in place, so they are the rune values on return.
-func convertRegexMatchIndicesToRuneRanges(data []byte, start int, match [][]int) {
+func convertRegexMatchIndicesToRuneRanges(data []byte, runeOffsetCache *runes.OffsetCache, start int, match [][]int) {
 	walker := runes.NewWalker(data)
-	walker.SetRunePos(start)
+	walker.SetRunePosCache(start, runeOffsetCache)
 
 	startByte := walker.BytePos()
 	startRune := walker.RunePos()
@@ -490,7 +497,7 @@ func (s *operationStage) executeV(rg Range) []Range {
 
 func (s *operationStage) executeGOrV(rg Range, op rune) []Range {
 	walker := runes.NewWalker(s.data)
-	data := walker.TextBetweenRuneIndices(rg.Start(), rg.End())
+	data := walker.TextBetweenRuneIndicesCache(rg.Start(), rg.End(), s.runeOffsetCache)
 
 	keepRange := s.re.Match(data)
 	if op == 'v' {
@@ -530,7 +537,7 @@ func (s *operationStage) executeN(rg Range) []Range {
 	}
 
 	walker := runes.NewWalker(s.data)
-	data := walker.TextBetweenRuneIndices(rg.Start(), rg.End())
+	data := walker.TextBetweenRuneIndicesCache(rg.Start(), rg.End(), s.runeOffsetCache)
 
 	// Find first match
 	indices := openerRe.FindIndex(data)
@@ -539,7 +546,7 @@ func (s *operationStage) executeN(rg Range) []Range {
 	}
 
 	moveForwardTo := indices[1]
-	convertRegexMatchIndicesToRuneRanges(data, rg.Start(), [][]int{indices})
+	convertRegexMatchIndicesToRuneRanges(data, s.runeOffsetCache, rg.Start(), [][]int{indices})
 	data = data[moveForwardTo:]
 	start := indices[0]
 	end := indices[1]
@@ -556,7 +563,7 @@ func (s *operationStage) executeN(rg Range) []Range {
 		}
 
 		moveForwardTo := indices[1]
-		convertRegexMatchIndicesToRuneRanges(data, rg.Start(), [][]int{indices})
+		convertRegexMatchIndicesToRuneRanges(data, s.runeOffsetCache, rg.Start(), [][]int{indices})
 		//fmt.Printf("operationStage.executeN:match at %d to %d, indices: %#v\n", indices[0], indices[1], indices)
 		data = data[moveForwardTo:]
 		end += indices[1]
@@ -575,8 +582,9 @@ func (s *operationStage) executeN(rg Range) []Range {
 }
 
 type commandStage struct {
-	cmd     command
-	handler Handler
+	cmd             command
+	handler         Handler
+	runeOffsetCache *runes.OffsetCache
 }
 
 func newCommandStage(cmd command, handler Handler) (stage commandStage) {
@@ -588,8 +596,9 @@ func newCommandStage(cmd command, handler Handler) (stage commandStage) {
 	return
 }
 
-func (s commandStage) Execute(data *[]byte, ranges []Range) ([]Range, error) {
+func (s commandStage) Execute(data *[]byte, runeOffsetCache *runes.OffsetCache, ranges []Range) ([]Range, error) {
 	var err error
+	s.runeOffsetCache = runeOffsetCache
 	switch s.cmd.op {
 	case 'd':
 		err = s.executeDelete(ranges)
@@ -752,7 +761,7 @@ func (s commandStage) subst(data []byte, r Range, offset int) (newOffset int) {
 		copy(submatches[i], match[2:])
 	}
 
-	convertRegexMatchIndicesToRuneRanges(data, r.Start(), indices)
+	convertRegexMatchIndicesToRuneRanges(data, s.runeOffsetCache, r.Start(), indices)
 
 	for i, match := range indices {
 		replacement := s.buildSubstReplacementFromSubmatches(data, rangeData, submatches[i])
@@ -786,7 +795,7 @@ func newGroupStage(groupTree interface{}, dot int) (stg groupStage, err error) {
 	return
 }
 
-func (s groupStage) Execute(data *[]byte, ranges []Range) (result []Range, err error) {
+func (s groupStage) Execute(data *[]byte, runeOffsetCache *runes.OffsetCache, ranges []Range) (result []Range, err error) {
 	for i, stage := range s.stages {
 		/*fmt.Printf("groupStage.Execute: executing on ranges [")
 		for _, r := range ranges {
@@ -795,7 +804,7 @@ func (s groupStage) Execute(data *[]byte, ranges []Range) (result []Range, err e
 		fmt.Printf("]\n")
 		*/
 
-		newRanges, err2 := stage.Execute(data, ranges)
+		newRanges, err2 := stage.Execute(data, runeOffsetCache, ranges)
 		dbg("Interpreter.Execute: after executing stage %d (%T) ranges are: %s", i, stage, rangesToString(ranges))
 		if err2 != nil {
 			err = err2
@@ -899,7 +908,7 @@ func newNoopCommandStage(handler Handler) (stage noopCommandStage) {
 	return
 }
 
-func (s noopCommandStage) Execute(data *[]byte, ranges []Range) ([]Range, error) {
+func (s noopCommandStage) Execute(data *[]byte, runeOffsetCache *runes.OffsetCache, ranges []Range) ([]Range, error) {
 	for _, r := range ranges {
 		s.handler.Noop(r)
 	}

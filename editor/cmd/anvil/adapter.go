@@ -17,8 +17,10 @@ type adapter interface {
 	cutAllSelectionsFromLastSelectedEditable(gtx layout.Context)
 	textOfAllSelectionsInLastSelectedEditable() []string
 	pasteToFocusedEditable(gtx layout.Context)
-	execute(e *editable, gtx layout.Context, cmd string, args []string)
-	plumb(e *editable, gtx layout.Context, obj string) (plumbed bool)
+	execute(e *editable, gtx layout.Context, cmd string, args []string, etx *EventContext, flags CmdFlags)
+	plumb(e *editable, gtx layout.Context, obj string, etx *EventContext) (plumbed bool)
+	window() *Window
+	column() *Col
 	loadFile(gtx layout.Context, displayPath, loadPath *GlobalPath, opts LoadFileOpts)
 	loadFileInPlace(gtx layout.Context, displayPath, loadPath *GlobalPath, opts LoadFileOpts)
 	textOfLastSelectionInEditor() string
@@ -26,9 +28,11 @@ type adapter interface {
 	setFocusedEditable(e *editable)
 	focusedEditable() *editable
 	completer() *PathCompleter
+	completerOmitWindowPath() *PathCompleter
 	dir() string
 	put()
 	get()
+	del()
 	displayPath() *GlobalPath
 	loadPath() *GlobalPath
 	mark(markName string, displayPath, loadPath *GlobalPath, cursorIndex int)
@@ -44,16 +48,18 @@ type adapter interface {
 	style() Style
 	setStyle(s Style)
 	insertWhenTabPressed() string
+	getCreator() interface{}
 }
 
 // editableAdapter connects an editable with the rest of the editor (it's owning window, etc)
 // so that it has less dependencies
 type editableAdapter struct {
 	executor *CommandExecutor
-	// owner is the owner of the editable: a Window, Col or Editor.
-	owner                           interface{}
-	shellString                     string
-	omitWindowPathWhenResolvingPath bool
+	// owner is the owner of the editable: a Window, Col, Editor or Float.
+	owner       interface{}
+	shellString string
+	// creator is the object that created the editable
+	creator interface{}
 }
 
 func (a editableAdapter) completeFilename(word string, callback CompletionsCallback) {
@@ -100,15 +106,15 @@ func (a editableAdapter) pasteToFocusedEditable(gtx layout.Context) {
 	editor.pasteToFocusedEditable(gtx)
 }
 
-func (a editableAdapter) execute(e *editable, gtx layout.Context, cmd string, args []string) {
+func (a editableAdapter) execute(e *editable, gtx layout.Context, cmd string, args []string, etx *EventContext, flags CmdFlags) {
 	if args == nil {
 		args = []string{}
 	}
 
 	log(LogCatgCmd, "adapter: Execute '%s' %v\n", cmd, args)
 	if a.executor != nil {
-		ctx := a.buildCmdContext(e, gtx, args)
-		ctx.RawCommand = cmd
+		ctx := a.buildCmdContext(e, gtx, args, etx)
+		ctx.Flags = flags
 		a.executor.Do(cmd, ctx)
 	}
 }
@@ -117,16 +123,12 @@ func (a editableAdapter) dir() string {
 	return a.completer().Dir().String()
 }
 
-func (a editableAdapter) completer() *PathCompleter {
+func (a editableAdapter) completerOmitWindowPath() *PathCompleter {
 	var completer *PathCompleter
 
 	switch v := a.executor.source.(type) {
 	case *Window:
-		if a.omitWindowPathWhenResolvingPath {
-			completer = NewPathCompleterForWindowOmitWinPath(v)
-		} else {
-			completer = NewPathCompleterForWindow(v)
-		}
+		completer = NewPathCompleterForWindowOmitWinPath(v)
 	case *Col:
 		completer = NewPathCompleterForColumn(v)
 	default:
@@ -134,9 +136,27 @@ func (a editableAdapter) completer() *PathCompleter {
 	}
 
 	return completer
+
 }
 
-func (a editableAdapter) buildCmdContext(e *editable, gtx layout.Context, args []string) *CmdContext {
+func (a editableAdapter) completer() *PathCompleter {
+	var completer *PathCompleter
+
+	switch v := a.executor.source.(type) {
+	case *Window:
+		completer = NewPathCompleterForWindow(v)
+	case *Col:
+		completer = NewPathCompleterForColumn(v)
+	case *Float:
+		completer = v.evoker.adapter.completer()
+	default:
+		completer = NewPathCompleter()
+	}
+
+	return completer
+}
+
+func (a editableAdapter) buildCmdContext(e *editable, gtx layout.Context, args []string, etx *EventContext) *CmdContext {
 	completer := a.completer()
 
 	dir := a.completer().Dir().String()
@@ -145,21 +165,22 @@ func (a editableAdapter) buildCmdContext(e *editable, gtx layout.Context, args [
 	// proper check here on the filetype if the path is unknown?
 
 	return &CmdContext{Gtx: gtx,
-		Completer:   completer,
-		Dir:         dir,
-		Editable:    e.executeOn,
-		Args:        args,
-		Selections:  e.selections,
-		ShellString: a.shellString,
+		Completer:    completer,
+		Dir:          dir,
+		Editable:     e.executeOn,
+		Args:         args,
+		Selections:   e.selections,
+		ShellString:  a.shellString,
+		EventContext: etx,
 	}
 }
 func (a *editableAdapter) setShellString(s string) {
 	a.shellString = s
 }
 
-func (a editableAdapter) plumb(e *editable, gtx layout.Context, obj string) (plumbed bool) {
+func (a editableAdapter) plumb(e *editable, gtx layout.Context, obj string, etx *EventContext) (plumbed bool) {
 	if plumber != nil && a.executor != nil {
-		ctx := a.buildCmdContext(e, gtx, nil)
+		ctx := a.buildCmdContext(e, gtx, nil, etx)
 		var err error
 		plumbed, err = plumber.Plumb(obj, a.executor, ctx)
 		if err != nil {
@@ -167,6 +188,33 @@ func (a editableAdapter) plumb(e *editable, gtx layout.Context, obj string) (plu
 		}
 	}
 	return
+}
+
+func (a editableAdapter) window() *Window {
+	var win *Window
+
+	switch v := a.owner.(type) {
+	case Window:
+	case *Window:
+		win = v
+	case Col:
+	case *Col:
+		col := v
+		if len(col.Windows) > 0 {
+			// Use the last active window
+			win = col.Windows[0]
+		}
+	case *Float:
+		win = v.evoker.adapter.window()
+	default:
+		l := editor.activeLayer()
+		if l != nil && len(l.Cols) > 0 && len(l.Cols[0].Windows) > 0 {
+			// Use the last active window
+			win = l.Cols[0].Windows[0]
+		}
+	}
+
+	return win
 }
 
 func (a editableAdapter) column() *Col {
@@ -180,9 +228,19 @@ func (a editableAdapter) column() *Col {
 		col = &v
 	case *Col:
 		col = v
+	default:
+		l := editor.activeLayer()
+		if l != nil && len(l.Cols) > 0 {
+			// Use the last active column
+			col = l.Cols[0]
+		}
 	}
 
 	return col
+}
+
+func (a editableAdapter) getCreator() interface{} {
+	return a.creator
 }
 
 func (a editableAdapter) loadFile(gtx layout.Context, displayPath, loadPath *GlobalPath, opts LoadFileOpts) {
@@ -232,12 +290,7 @@ func (a editableAdapter) shiftEditorItemsDueToTextModification(startOfChange, le
 }
 
 func (a editableAdapter) setFocusedEditable(e *editable) {
-	w := (*Window)(nil)
-	if win, ok := a.owner.(*Window); ok {
-		w = win
-	}
-
-	editor.setFocusedEditable(e, w)
+	editor.setFocusedEditable(e, a.owner)
 }
 
 func (a editableAdapter) focusedEditable() *editable {
@@ -255,6 +308,16 @@ func (a editableAdapter) get() {
 	w, ok := a.owner.(*Window)
 	if ok {
 		w.Get()
+	}
+}
+
+func (a editableAdapter) del() {
+	switch v := a.owner.(type) {
+	case Window:
+	case *Window:
+		v.Del()
+	case *Float:
+		editor.DelFloat(v)
 	}
 }
 
@@ -318,8 +381,7 @@ func (a editableAdapter) style() Style {
 }
 
 func (a editableAdapter) setStyle(s Style) {
-	WindowStyle = s
-	editor.SetStyle(s)
+	SetStyle(s)
 }
 
 func (a editableAdapter) insertWhenTabPressed() string {
@@ -337,15 +399,20 @@ func (a editableAdapter) insertWhenTabPressed() string {
 
 type nilAdapter struct{}
 
-func (a nilAdapter) completeFilename(word string, callback CompletionsCallback)         {}
-func (a nilAdapter) completeCommand(word string, callback CompletionsCallback)          {}
-func (a nilAdapter) appendError(dir, msg string)                                        {}
-func (a nilAdapter) copyAllSelectionsFromLastSelectedEditable(gtx layout.Context)       {}
-func (a nilAdapter) cutAllSelectionsFromLastSelectedEditable(gtx layout.Context)        {}
-func (a nilAdapter) textOfAllSelectionsInLastSelectedEditable() []string                { return nil }
-func (a nilAdapter) pasteToFocusedEditable(gtx layout.Context)                          {}
-func (a nilAdapter) execute(e *editable, gtx layout.Context, cmd string, args []string) {}
-func (a nilAdapter) plumb(e *editable, gtx layout.Context, obj string) (plumbed bool)   { return false }
+func (a nilAdapter) completeFilename(word string, callback CompletionsCallback)   {}
+func (a nilAdapter) completeCommand(word string, callback CompletionsCallback)    {}
+func (a nilAdapter) appendError(dir, msg string)                                  {}
+func (a nilAdapter) copyAllSelectionsFromLastSelectedEditable(gtx layout.Context) {}
+func (a nilAdapter) cutAllSelectionsFromLastSelectedEditable(gtx layout.Context)  {}
+func (a nilAdapter) textOfAllSelectionsInLastSelectedEditable() []string          { return nil }
+func (a nilAdapter) pasteToFocusedEditable(gtx layout.Context)                    {}
+func (a nilAdapter) execute(e *editable, gtx layout.Context, cmd string, args []string, etx *EventContext, flags CmdFlags) {
+}
+func (a nilAdapter) plumb(e *editable, gtx layout.Context, obj string, etx *EventContext) (plumbed bool) {
+	return false
+}
+func (a nilAdapter) column() *Col    { return nil }
+func (a nilAdapter) window() *Window { return nil }
 func (a nilAdapter) loadFile(gtx layout.Context, displayPath, loadPath *GlobalPath, opts LoadFileOpts) {
 }
 func (a nilAdapter) loadFileInPlace(gtx layout.Context, displayPath, loadPath *GlobalPath, opts LoadFileOpts) {
@@ -355,12 +422,14 @@ func (a nilAdapter) shiftEditorItemsDueToTextModification(startOfChange, lengthO
 func (a nilAdapter) setFocusedEditable(e *editable)                                          {}
 func (a nilAdapter) focusedEditable() *editable                                              { return nil }
 func (a nilAdapter) completer() *PathCompleter                                               { return nil }
+func (a nilAdapter) completerOmitWindowPath() *PathCompleter                                 { return nil }
 func (a nilAdapter) completeN(file string, n int) (path *GlobalPath, err error) {
 	return nil, fmt.Errorf("not implemented")
 }
 func (a nilAdapter) dir() string                                                              { return "" }
 func (a nilAdapter) put()                                                                     {}
 func (a nilAdapter) get()                                                                     {}
+func (a nilAdapter) del()                                                                     {}
 func (a nilAdapter) displayPath() *GlobalPath                                                 { return nil }
 func (a nilAdapter) loadPath() *GlobalPath                                                    { return nil }
 func (a nilAdapter) mark(markName string, displayPath, loadPath *GlobalPath, cursorIndex int) {}
@@ -377,3 +446,4 @@ func (a nilAdapter) style() Style                                               
 func (a nilAdapter) setStyle(s Style)                                                         {}
 func (a nilAdapter) insertWhenTabPressed() string                                             { return "\t" }
 func (a nilAdapter) clearErrors()                                                             {}
+func (a nilAdapter) getCreator() interface{}                                                  { return nil }

@@ -2,9 +2,10 @@ package main
 
 import (
 	"fmt"
-	"github.com/jeffwilliams/anvil/api/go/anvil"
 	"os"
 	"path/filepath"
+
+	"github.com/jeffwilliams/anvil/api/go/anvil"
 )
 
 func cmdDef(win anvil.Window, cmd []string) {
@@ -25,26 +26,6 @@ func getLocationsForItemUnderPrimaryCursor(win anvil.Window, method getLocationM
 	}
 
 	return method(win.Path, line, col)
-
-	/*
-		cursors, err := anvilHttpApi.WindowBodyCursors(win)
-		if err != nil {
-			err = fmt.Errorf("error reading cursors: %v\n", err)
-			return
-		}
-
-		data, err := winBody(win)
-		if err != nil {
-			err = fmt.Errorf("error getting window info when opened: %v\n", err)
-			return
-		}
-
-		if len(cursors) == 0 {
-			return
-		}
-
-		return getLocationsForItemUnderCursor(win, data, cursors[0], method)
-	*/
 }
 
 func getLocationsForItemUnderCursor(win anvil.Window, data []byte, cursor int, method getLocationMethod) (simple []SimpleLocation, err error) {
@@ -71,6 +52,7 @@ func getPrimaryCursorLocation(win anvil.Window) (line, col uint, err error) {
 	}
 
 	line, col = cursorLineAndCol(data, cursors[0])
+	debug("getPrimaryCursorLocation: line %d col %d\n", line, col)
 	return
 }
 
@@ -118,7 +100,7 @@ func cmdHover(win anvil.Window, cmd []string) {
 		return
 	}
 
-	printMsg(info)
+	printMsg("%s", info)
 }
 
 func printLocations(win anvil.Window, locs []SimpleLocation) {

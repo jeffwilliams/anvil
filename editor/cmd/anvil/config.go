@@ -51,6 +51,29 @@ func LoadSshKeys() {
 	}
 }
 
+func SyntaxFileDir() string {
+	return filepath.Join(ConfDir, "syntax")
+}
+
+func LoadSyntaxFiles() {
+	d := SyntaxFileDir()
+	entries, err := os.ReadDir(d)
+	if err != nil {
+		log(LogCatgConf, "Error reading syntax directory: %v\n", err)
+		return
+	}
+
+	for _, e := range entries {
+		log(LogCatgConf, "Loading syntax highlighting lexer %s\n", e.Name())
+		path := filepath.Join(d, e.Name())
+		err := LoadLexerFromFile(path)
+		if err != nil {
+			log(LogCatgConf, "Loading syntax highlighting lexer file '%s' failed: %s\n", path, err)
+		}
+
+	}
+}
+
 func StyleConfigFile() string {
 	return filepath.Join(ConfDir, "style.js")
 }
@@ -138,11 +161,18 @@ func LoadCurrentStyleFromFile(path string, defaults *Style) (err error) {
 	if err != nil {
 		return err
 	}
+	SetStyle(s)
+
+	return
+}
+
+func SetStyle(s Style) {
 	WindowStyle = s
 	ansi.InitColors(WindowStyle.Ansi.AsColors())
 	editor.SetStyle(WindowStyle)
-
-	return
+	fileScopedTrays.SetStyle(s)
+	globalScopedTrays.SetStyle(s)
+	sessionScopedTrays.SetStyle(s)
 }
 
 func SaveCurrentStyleToFile(path string) (err error) {
@@ -177,6 +207,7 @@ type Settings struct {
 	General     GeneralSettings
 	Env         map[string]string
 	Alias       map[string]string
+	Debug       DebugSettings
 }
 
 type SshSettings struct {
@@ -213,6 +244,10 @@ type LayoutSettings struct {
 
 type GeneralSettings struct {
 	ExecuteOnStartup []string `toml:"exec"`
+}
+
+type DebugSettings struct {
+	DumpLogsOnUiFreeze bool `toml:"dump-logs-on-ui-freeze"`
 }
 
 func GenerateSampleSettings() string {
@@ -317,4 +352,8 @@ func parseDoMatchConfigFile(f io.Reader, onMatch func(re *regexp.Regexp), onDo f
 		}
 	}
 	return
+}
+
+func KeymapConfigFile() string {
+	return filepath.Join(ConfDir, "keymaps")
 }

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -51,6 +53,8 @@ func (h helper) addTopics() {
 	h.addEnvironmentHelp()
 	h.addRegexHelp()
 	h.addRangeStatementHelp()
+	h.addKeyActionHelp()
+	h.addKeyActionMkdocsHelp()
 }
 
 func topLevelHelpString() string {
@@ -77,6 +81,9 @@ Range Statements (◊Help Range Statements◊)
 
 Commands (◊Help Commands◊)
 	A list of built-in editor commands 
+
+Key Actions (◊Help Key Actions◊)
+	A list of actions that can be used in key maps
 
 `, strings.Title(editorName))
 
@@ -312,4 +319,101 @@ As another example, to select from the first occurrence of 'begin' in the file t
 `
 	h.addHelp("Range Statements", s)
 
+}
+
+func (h helper) addKeyActionHelp() {
+	var text bytes.Buffer
+	fmt.Fprintf(&text, `Key Actions
+
+The following actions can be used in key mappings.
+
+`)
+
+	sortedKeyActions := make([]keyAction, len(keyActions))
+	copy(sortedKeyActions, keyActions)
+	sort.Slice(sortedKeyActions, func(i, j int) bool {
+		return keyActions[i].name < keyActions[j].name
+	})
+
+	for _, a := range sortedKeyActions {
+		fmt.Fprintf(&text, "%s", a.name)
+		for i, p := range a.paramLabels {
+			if i == 0 {
+				fmt.Fprintf(&text, "  [")
+			} else {
+				fmt.Fprintf(&text, "  ")
+			}
+
+			fmt.Fprintf(&text, "%s", p)
+
+			if i == len(a.paramLabels)-1 {
+				fmt.Fprintf(&text, "]")
+			}
+		}
+		fmt.Fprintf(&text, "\n\t%s\n", a.desc)
+	}
+
+	h.addHelp("Key Actions", text.String())
+}
+
+// addKeyActionMkdocsHelp is used to help me update the website docs.
+func (h helper) addKeyActionMkdocsHelp() {
+	var text bytes.Buffer
+
+	fmt.Fprintf(&text, `| Name | Arguments | Description |
+| ----- | --- |--------- |
+`)
+
+	sortedKeyActions := make([]keyAction, len(keyActions))
+	copy(sortedKeyActions, keyActions)
+	sort.Slice(sortedKeyActions, func(i, j int) bool {
+		return keyActions[i].name < keyActions[j].name
+	})
+
+	for _, a := range sortedKeyActions {
+		fmt.Fprintf(&text, "| %s | ", a.name)
+		for i, p := range a.paramLabels {
+			if i > 0 {
+				fmt.Fprintf(&text, "  ")
+			}
+
+			fmt.Fprintf(&text, "%s", p)
+		}
+		fmt.Fprintf(&text, " | %s |\n", a.desc)
+
+	}
+
+	h.addHelp("Key Actions mkdocs", text.String())
+}
+
+// addCommandMkdocsHelp is used to help me update the website docs.
+func (h helper) addCommandMkdocsHelp() {
+	var text bytes.Buffer
+
+	cmds := NewCommandExecutor(nil)
+	sorted := make([]command, 0, len(cmds.commands))
+	for _, cmd := range cmds.commands {
+		sorted = append(sorted, cmd)
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].name < sorted[j].name
+	})
+
+	r, err := regexp.Compile(`[^ ]*/(plumbing|style.js)`)
+	if err != nil {
+		r = nil
+	}
+	replacePaths := func(s string) string {
+		if r == nil {
+			return s
+		}
+		return string(r.ReplaceAll([]byte(s), []byte("[&lt;config-dir&gt;](config.md)/$1")))
+	}
+
+	for _, cmd := range sorted {
+		fmt.Fprintf(&text, "## %s\n\n", cmd.name)
+		fmt.Fprintf(&text, "%s\n\n", replacePaths(cmd.longHelp))
+	}
+
+	h.addHelp("Commands mkdocs", text.String())
 }

@@ -1,0 +1,53 @@
+{
+  "Fonts": [
+    {
+      "FontName": "~/.fonts/KiwiMonoRegular.ttf",
+      "FontSize": 13
+    }
+  ],
+"TagFgColor": "#e8e8e8",
+"TagBgColor": "#282828",
+"TagPathBasenameColor": "#ffffff",
+"BodyFgColor": "#d8d8d8",
+"BodyBgColor": "#181818",
+"LayoutBoxFgColor": "#383838",
+"LayoutBoxUnsavedBgColor": "#ab4642",
+"LayoutBoxBgColor": "#7cafc2",
+"ScrollFgColor": "#383838",
+"ScrollBgColor": "#181818",
+"GutterWidth": 12,
+"WinBorderColor": "#383838",
+"WinBorderWidth": 1,
+"PrimarySelectionFgColor": "#ffffff",
+"PrimarySelectionBgColor": "#585858",
+"SecondarySelectionFgColor": "#282828",
+"SecondarySelectionBgColor": "#d8d8d8",
+"ErrorsTagFgColor": "#d8d8d8",
+"ErrorsTagPathBasenameColor": "#ffffff",
+"ErrorsTagBgColor": "#ab4642",
+"ErrorsTagFlashFgColor": "#d8d8d8",
+"ErrorsTagFlashPathBasenameColor": "#ffffff",
+"ErrorsTagFlashBgColor": "#ab4642",
+"TrayFgColor": "#d8d8d8",
+"TrayBgColor": "#282828",
+"TrayInnerBorderColor": "#383838",
+"TrayInnerBorderWidth": 1,
+"TrayOuterBorderColor": "#181818",
+"TrayOuterBorderWidth": 1,
+"TabStopInterval": 30,
+"Syntax": {
+  "KeywordColor": "#ffffff",
+  "NameColor": "#d8d8d8",
+  "StringColor": "#d8d8d8",
+  "NumberColor": "#d8d8d8",
+  "OperatorColor": "#d8d8d8",
+  "CommentColor": "#777777",
+  "PreprocessorColor": "#d8d8d8",
+  "HeadingColor": "#d8d8d8",
+  "SubheadingColor": "#d8d8d8",
+  "InsertedColor": "#a1b56c",
+  "DeletedColor": "#ab4642"
+},
+"LineSpacing": 0,
+"TextLeftPadding": 3
+}

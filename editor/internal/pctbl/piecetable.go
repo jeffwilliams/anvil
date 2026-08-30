@@ -589,7 +589,7 @@ func (pt *PieceTable) pieceListDebugString() string {
 		if n == l.head || n == l.tail {
 			buf.WriteString("SENT ") // sentinel
 		}
-		buf.WriteString(fmt.Sprintf("%p %#v ‘%s’", n, n, pt.textOf(n)))
+		buf.WriteString(fmt.Sprintf("%p %#v '%s'", n, n, pt.textOf(n)))
 		i++
 	}
 	return buf.String()
@@ -680,22 +680,29 @@ func runeIndexToByteIndex(rindex int, b []byte, runeLen int) int {
 	// LastRuneLen is a little slower than RuneLen, but probably faster
 	// than scanning forwards to near the end of a long byte slice.
 	threeFifths := runeLen * 3 / 5
-	byteOffset := 0
 
 	if rindex <= threeFifths {
-		for i := 0; i < rindex; i++ {
-			sz := RuneLen(b)
-			b = b[sz:]
-			byteOffset += sz
-		}
-		return byteOffset
+		return runeIndexToByteIndexForward(rindex, b, runeLen)
 	}
 
-	byteOffset = len(b)
+	return runeIndexToByteIndexBackward(rindex, b, runeLen)
+}
+
+func runeIndexToByteIndexForward(rindex int, b []byte, runeLen int) int {
+	byteOffset := 0
+	for i := 0; i < rindex; i++ {
+		sz := RuneLen(b)
+		b = b[sz:]
+		byteOffset += sz
+	}
+	return byteOffset
+}
+
+func runeIndexToByteIndexBackward(rindex int, b []byte, runeLen int) int {
+	byteOffset := len(b)
 	for i := runeLen; i > rindex; i-- {
 		sz := LastRuneLen(b)
 		b = b[:len(b)-sz]
-		runeLen--
 		byteOffset -= sz
 	}
 	return byteOffset

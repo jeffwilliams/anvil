@@ -47,8 +47,9 @@ func newElastic(input []rune, fontFace text.FontFace, fontSize, minWidth, paddin
 		input:  input,
 		shaper: GetTextShaper(fontFace),
 		shaperParams: text.Parameters{
-			Font:    fontFace.Font,
-			PxPerEm: fixed.I(fontSize),
+			Font:             fontFace.Font,
+			PxPerEm:          fixed.I(fontSize),
+			DisableSpaceTrim: true,
 		},
 		minWidth: fixed.I(minWidth),
 		padding:  fixed.I(padding),

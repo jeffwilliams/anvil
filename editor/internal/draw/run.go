@@ -1,12 +1,13 @@
 package draw
 
 import (
+	"image/color"
+
 	"gioui.org/f32"
 	"gioui.org/layout"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
-	"image/color"
 )
 
 func Run(gtx layout.Context, ops []Op, consts map[Const]float32) {
