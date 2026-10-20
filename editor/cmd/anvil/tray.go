@@ -245,7 +245,7 @@ func (r *Trays) Del(name string) (found bool) {
 }
 
 func (r Trays) SetStyle(style Style) {
-	for _,f := range r.floats {
+	for _, f := range r.floats {
 		f.SetStyle(style)
 	}
 }

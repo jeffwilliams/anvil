@@ -12,8 +12,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"golang.org/x/image/math/fixed"  
- 
+	"golang.org/x/image/math/fixed"
+
 	"math"
 
 	"gioui.org/f32"
@@ -86,7 +86,7 @@ type editable struct {
 	keys                           *keymap.Stack
 	keyPressHook                   func(ev *key.Event)
 	textInputHook                  func(text string)
-	keyHandlingCoordination keyHandlingCoordination
+	keyHandlingCoordination        keyHandlingCoordination
 }
 
 type editableStyle struct {
@@ -218,7 +218,7 @@ func (e *editable) KeyPress(gtx layout.Context, ev *key.Event) {
 		if ev.Name == key.NameSpace && ev.Modifiers&key.ModCtrl > 0 {
 			// This is to handle an odd behaviour on Windows. They key combination CTRL-Space results
 			// in both a Keypress notification and an Edit event with a space. If we mapped
-			// CTRL-Space to something, this means the text is also input. 
+			// CTRL-Space to something, this means the text is also input.
 			// Since on Windows we get edit events after key events, we can ignore the later
 			// edit event in this case.
 			e.keyHandlingCoordination.recievedAndHandledCtrlSpaceKeyThisLayout = true
@@ -1678,20 +1678,23 @@ func (e *editable) onPointerRelease(ps *PointerState) {
 }
 
 func (e *editable) onPointerScroll(ps *PointerState) {
+	delta := gioPointerScrollDelta(&ps.currentPointerEvent.Event)
+	if delta == 0 {
+		return
+	}
+
 	direction := Down
-	if ps.currentPointerEvent.Scroll.Y > 0 {
-		direction = Down
-	} else {
+	if delta < 0 {
 		direction = Up
 	}
 
-	if ps.currentPointerEvent.Modifiers.Contain(key.ModCtrl) && ps.currentPointerEvent.Modifiers.Contain(key.ModShift) {
+	if ps.currentPointerEvent.Modifiers.Contain(key.ModCtrl | key.ModShift) {
 		activeLayer := editor.activeLayer()
 		if activeLayer == nil {
 			return
 		}
 
-		if ps.currentPointerEvent.Scroll.Y <= 0 {
+		if direction == Up {
 			activeLayer.WidenView()
 		} else {
 			activeLayer.NarrowView()
@@ -2117,7 +2120,6 @@ func (k *keyHandlingCoordination) LayoutStarted() {
 	k.recievedAndHandledCtrlSpaceKeyThisLayout = false
 }
 
-
 func (e *editable) InsertTextAndHandleKeys(gtx layout.Context, text string) {
 	if e.textInputHook != nil {
 		e.textInputHook(text)
@@ -2145,10 +2147,10 @@ func (e *editable) InsertTextAndHandleKeys(gtx layout.Context, text string) {
 	//
 
 	for _, r := range text {
-		if r == ' ' && e.keyHandlingCoordination.recievedAndHandledCtrlSpaceKeyThisLayout	 {
+		if r == ' ' && e.keyHandlingCoordination.recievedAndHandledCtrlSpaceKeyThisLayout {
 			continue
 		}
-	
+
 		s := string(r)
 
 		var modifiers key.Modifiers

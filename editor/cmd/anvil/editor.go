@@ -560,7 +560,7 @@ func (e *Editor) LoadFile(displayPath, loadPath *GlobalPath) *Window {
 }
 
 func (e *Editor) LoadFileOpts(displayPath, loadPath *GlobalPath, opts LoadFileOpts) *Window {
-	w, _  := e.FindWindowForFile(loadPath.String())
+	w, _ := e.FindWindowForFile(loadPath.String())
 	if w != nil {
 
 		e.EnsureWindowIsVisible(w, opts.MoveLayerBehaviour, opts.MoveNonVisibleWindowBehaviour, opts.InCol)
@@ -1160,7 +1160,7 @@ func (e *Editor) SetStyle(style Style) {
 	for _, f := range e.floats {
 		f.SetStyle(style)
 	}
-	
+
 }
 
 func (e *Editor) Execute(cmd string, args []string) {
