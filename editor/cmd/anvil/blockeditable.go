@@ -100,8 +100,8 @@ func (t *blockEditable) nextEvent(gtx layout.Context) (ev event.Event, ok bool) 
 	pf := pointer.Filter{
 		Target:  t,
 		Kinds:   pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll,
-		ScrollX: pointer.ScrollRange{-100, -100},
-		ScrollY: pointer.ScrollRange{100, 100},
+		ScrollX: pointer.ScrollRange{-100, 100},
+		ScrollY: pointer.ScrollRange{-100, 100},
 	}
 
 	// Since no keys are specified, this matches events for all keys (a catch-all)

@@ -304,7 +304,7 @@ var DefaultWindowStyle = Style{
 		},
 	},
 	compiledCursorProg: MustParseDefaultCursorProg(),
-	CursorProg: DefaultCursorProg,
+	CursorProg:         DefaultCursorProg,
 }
 
 var WindowStyle = DefaultWindowStyle

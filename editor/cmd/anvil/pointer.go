@@ -119,6 +119,13 @@ func pointerEventsOccurredAtAlmostSamePlace(a, b *pointerEvent) bool {
 	return gioPointerEventsOccurredAtAlmostSamePlace(&a.Event, &b.Event)
 }
 
+func gioPointerScrollDelta(ev *pointer.Event) float32 {
+	if ev.Scroll.Y != 0 {
+		return ev.Scroll.Y
+	}
+	return ev.Scroll.X
+}
+
 func gioPointerEventsOccurredAtAlmostSamePlace(a, b *pointer.Event) bool {
 	return pointsAreAlmostSame(&a.Position, &b.Position, pointerEventDistanceToleranceSquared)
 }

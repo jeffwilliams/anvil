@@ -232,9 +232,13 @@ func (l *layerLayouter) handlePointerEvent(gtx layout.Context, ev *pointer.Event
 		return
 	}
 
-	if ev.Modifiers.Contain(key.ModCtrl) && ev.Modifiers.Contain(key.ModShift) {
-		fmt.Printf("l scroll event: %v\n", ev)
-		if ev.Scroll.Y <= 0 {
+	delta := gioPointerScrollDelta(ev)
+	if delta == 0 {
+		return
+	}
+
+	if ev.Modifiers.Contain(key.ModCtrl | key.ModShift) {
+		if delta < 0 {
 			l.layer.WidenView()
 		} else {
 			l.layer.NarrowView()
